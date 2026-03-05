@@ -25,3 +25,14 @@ end, LibCustomMenu.CATEGORY_LATE)
 ## Notes
 - Submenu entries open a dedicated gamepad submenu dialog.
 - Callbacks that rely on mouse-only UI controls may need per-addon adjustments.
+
+## Settings and Debug
+- Addon panel: `Settings -> Addon Settings -> LibGamepadContextMenuBridge` (requires `LibAddonMenu-2.0`).
+- Available toggles: enable bridge, debug mode, verbose debug.
+- Slash command: `/lgcmb`
+  - `/lgcmb status`
+  - `/lgcmb on` or `/lgcmb off`
+  - `/lgcmb debug on` or `/lgcmb debug off`
+  - `/lgcmb verbose on` or `/lgcmb verbose off`
+  - `/lgcmb log 60`
+  - `/lgcmb clearlog`
