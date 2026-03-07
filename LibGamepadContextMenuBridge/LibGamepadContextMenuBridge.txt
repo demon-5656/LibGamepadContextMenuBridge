@@ -1,10 +1,10 @@
 ## Title: LibGamepadContextMenuBridge
 ## Author: pc243, Codex
 ## APIVersion: 101048 101049
-## Version: 1.3.0
-## AddOnVersion: 130
+## Version: 1.3.3
+## AddOnVersion: 133
 ## IsLibrary: true
-## DependsOn: LibCustomMenu
+## DependsOn: LibCustomMenu>=730
 ## OptionalDependsOn: LibAddonMenu-2.0
 ## SavedVariables: LibGamepadContextMenuBridge_SavedVars
 ## Description: Mirrors LibCustomMenu inventory context menu entries into gamepad inventory actions.

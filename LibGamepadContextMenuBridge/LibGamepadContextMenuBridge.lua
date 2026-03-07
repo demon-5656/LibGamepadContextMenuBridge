@@ -1,5 +1,5 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 2
+local MINOR = 3
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -752,7 +752,7 @@ function bridge:_initializeSettingsPanel()
         name = MAJOR,
         displayName = MAJOR,
         author = "pc243, Codex",
-        version = "1.3.0",
+        version = "1.3.3",
         registerForRefresh = true,
         registerForDefaults = true,
     }
@@ -1427,20 +1427,12 @@ end
 local EVENT_NAMESPACE = MAJOR .. "_OnLoaded"
 
 local function OnAddonLoaded(_, addonName)
-    if addonName == MAJOR then
-        bridge:Initialize()
-    else
-        -- Late-loading optional/required libs can appear after this addon in some setups.
-        if not bridge._settingsPanelRegistered then
-            bridge:_initializeSettingsPanel()
-        end
-        if not bridge._refreshHooked then
-            bridge:_hookRefreshKeybindStrip()
-        end
-        if not bridge._initialized and type(LibCustomMenu) == "table" then
-            bridge:Initialize()
-        end
+    if addonName ~= MAJOR then
+        return
     end
+
+    EVENT_MANAGER:UnregisterForEvent(EVENT_NAMESPACE, EVENT_ADD_ON_LOADED)
+    bridge:Initialize()
 end
 
 EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_ADD_ON_LOADED, OnAddonLoaded)
