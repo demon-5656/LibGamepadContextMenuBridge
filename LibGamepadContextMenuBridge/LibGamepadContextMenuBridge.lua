@@ -23,6 +23,7 @@ bridge._submenuDialogRegistered = bridge._submenuDialogRegistered or false
 bridge._submenuDialogName = bridge._submenuDialogName or (MAJOR .. "_SubmenuDialog")
 bridge._settingsPanelRegistered = bridge._settingsPanelRegistered or false
 bridge._slashCommandsRegistered = bridge._slashCommandsRegistered or false
+bridge._tooltipPriceHooked = bridge._tooltipPriceHooked or false
 bridge._debugLog = bridge._debugLog or {}
 bridge._stringIdByLabel = bridge._stringIdByLabel or {}
 bridge._nextStringIdIndex = bridge._nextStringIdIndex or 1
@@ -36,6 +37,11 @@ local DEFAULTS = {
     debugToChat = true,
     debugStoreHistory = true,
     maxDebugMessages = 200,
+    showTtcPriceInTooltip = false,
+    showTtcPriceDetailsInTooltip = false,
+    showJunkStatusInTooltip = true,
+    showVendorPriceInTooltip = true,
+    showBoundStatusInTooltip = true,
 }
 
 local unpackArgs = unpack or table.unpack
@@ -479,6 +485,67 @@ function bridge:_resolveNormalizedSlotType(inventorySlot, slotType)
     return slotType
 end
 
+function bridge:_resolveBagAndSlot(inventorySlot)
+    if type(inventorySlot) == "table" then
+        local bagId = inventorySlot.bagId or inventorySlot.bag
+        local slotIndex = inventorySlot.slotIndex or inventorySlot.slot
+        if bagId ~= nil and slotIndex ~= nil then
+            return bagId, slotIndex
+        end
+    end
+
+    if type(ZO_Inventory_GetBagAndIndex) ~= "function" then
+        return nil, nil
+    end
+
+    local bagId, slotIndex = ZO_Inventory_GetBagAndIndex(inventorySlot)
+    if bagId == nil or slotIndex == nil then
+        return nil, nil
+    end
+
+    return bagId, slotIndex
+end
+
+function bridge:_buildNativeJunkAction(inventorySlot)
+    if type(SetItemIsJunk) ~= "function" or type(IsItemJunk) ~= "function" then
+        return nil
+    end
+
+    local bagId, slotIndex = self:_resolveBagAndSlot(inventorySlot)
+    if bagId == nil or slotIndex == nil then
+        return nil
+    end
+
+    if type(BAG_VIRTUAL) == "number" and bagId == BAG_VIRTUAL then
+        return nil
+    end
+
+    local isJunk = IsItemJunk(bagId, slotIndex) == true
+    if not isJunk then
+        if type(IsItemPlayerLocked) == "function" and IsItemPlayerLocked(bagId, slotIndex) then
+            return nil
+        end
+
+        if type(CanItemBeMarkedAsJunk) ~= "function" or not CanItemBeMarkedAsJunk(bagId, slotIndex) then
+            return nil
+        end
+    end
+
+    local labelStringId = isJunk and SI_ITEM_ACTION_UNMARK_AS_JUNK or SI_ITEM_ACTION_MARK_AS_JUNK
+    local fallbackLabel = isJunk and "Unmark as Junk" or "Mark as Junk"
+    local label = SafeGetString(labelStringId, fallbackLabel)
+    if type(label) ~= "string" or label == "" then
+        return nil
+    end
+
+    return {
+        label = label,
+        callback = function()
+            SetItemIsJunk(bagId, slotIndex, not isJunk)
+        end,
+    }
+end
+
 function bridge:_rememberContextCallback(func, category, args)
     if type(func) ~= "function" then
         return
@@ -603,6 +670,41 @@ function bridge:SetDebugVerbose(enabled)
     self:_debugMessage("Debug verbose: " .. tostring(self.debugVerbose), false)
 end
 
+function bridge:SetShowTtcPriceInTooltip(enabled)
+    local value = not not enabled
+    if self.savedVars then
+        self.savedVars.showTtcPriceInTooltip = value
+    end
+end
+
+function bridge:SetShowTtcPriceDetailsInTooltip(enabled)
+    local value = not not enabled
+    if self.savedVars then
+        self.savedVars.showTtcPriceDetailsInTooltip = value
+    end
+end
+
+function bridge:SetShowJunkStatusInTooltip(enabled)
+    local value = not not enabled
+    if self.savedVars then
+        self.savedVars.showJunkStatusInTooltip = value
+    end
+end
+
+function bridge:SetShowVendorPriceInTooltip(enabled)
+    local value = not not enabled
+    if self.savedVars then
+        self.savedVars.showVendorPriceInTooltip = value
+    end
+end
+
+function bridge:SetShowBoundStatusInTooltip(enabled)
+    local value = not not enabled
+    if self.savedVars then
+        self.savedVars.showBoundStatusInTooltip = value
+    end
+end
+
 function bridge:ClearDebugLog()
     self._debugLog = {}
     self:_debugMessage("Debug log cleared", false)
@@ -648,6 +750,289 @@ function bridge:_initializeSavedVars()
     self.debug = self.savedVars.debug == true
     self.debugVerbose = self.savedVars.debugVerbose == true
     LogTrace("SavedVars loaded")
+end
+
+function bridge:_shouldShowTtcTooltipPrice()
+    return self.savedVars and self.savedVars.showTtcPriceInTooltip == true
+end
+
+function bridge:_shouldShowTtcTooltipDetails()
+    return self.savedVars and self.savedVars.showTtcPriceDetailsInTooltip == true
+end
+
+function bridge:_shouldShowJunkStatusInTooltip()
+    return not not (self.savedVars and self.savedVars.showJunkStatusInTooltip ~= false)
+end
+
+function bridge:_shouldShowVendorPriceInTooltip()
+    return not not (self.savedVars and self.savedVars.showVendorPriceInTooltip ~= false)
+end
+
+function bridge:_shouldShowBoundStatusInTooltip()
+    return not not (self.savedVars and self.savedVars.showBoundStatusInTooltip ~= false)
+end
+
+function bridge:_getTtcPriceInfo(itemLink)
+    if type(itemLink) ~= "string" or itemLink == "" then
+        return nil
+    end
+
+    if type(TamrielTradeCentrePrice) ~= "table" or type(TamrielTradeCentrePrice.GetPriceInfo) ~= "function" then
+        return nil
+    end
+
+    local ok, priceInfo = pcall(TamrielTradeCentrePrice.GetPriceInfo, TamrielTradeCentrePrice, itemLink)
+    if not ok then
+        return nil
+    end
+
+    return priceInfo
+end
+
+function bridge:_formatTtcCurrency(value)
+    if type(value) ~= "number" then
+        return nil
+    end
+
+    if type(ZO_CurrencyControl_FormatCurrency) == "function" then
+        local ok, formatted = pcall(ZO_CurrencyControl_FormatCurrency, value, true, nil)
+        if ok and type(formatted) == "string" and formatted ~= "" then
+            return formatted
+        end
+    end
+
+    if type(TamrielTradeCentre) == "table" and type(TamrielTradeCentre.FormatNumber) == "function" then
+        local ok, formatted = pcall(TamrielTradeCentre.FormatNumber, TamrielTradeCentre, value, 0)
+        if ok and type(formatted) == "string" and formatted ~= "" then
+            return formatted
+        end
+    end
+
+    return tostring(zo_floor and zo_floor(value) or math.floor(value))
+end
+
+function bridge:_formatTooltipInfoCurrency(value)
+    return self:_formatTtcCurrency(value)
+end
+
+function bridge:_getItemLinkFromBagAndSlot(bagId, slotIndex)
+    if type(GetItemLink) ~= "function" or bagId == nil or slotIndex == nil then
+        return nil
+    end
+
+    local ok, itemLink = pcall(GetItemLink, bagId, slotIndex)
+    if not ok or type(itemLink) ~= "string" or itemLink == "" then
+        return nil
+    end
+
+    return itemLink
+end
+
+function bridge:_getVendorPriceText(bagId, slotIndex)
+    if not self:_shouldShowVendorPriceInTooltip() then
+        return nil
+    end
+
+    local sellPrice = nil
+    if type(GetItemSellValueWithBonuses) == "function" then
+        local ok, value = pcall(GetItemSellValueWithBonuses, bagId, slotIndex)
+        if ok and type(value) == "number" then
+            sellPrice = value
+        end
+    end
+
+    if sellPrice == nil and type(GetItemSellValue) == "function" then
+        local ok, value = pcall(GetItemSellValue, bagId, slotIndex)
+        if ok and type(value) == "number" then
+            sellPrice = value
+        end
+    end
+
+    if type(sellPrice) ~= "number" or sellPrice <= 0 then
+        return nil
+    end
+
+    local priceText = self:_formatTooltipInfoCurrency(sellPrice)
+    if type(priceText) ~= "string" or priceText == "" then
+        return nil
+    end
+
+    return "Vendor: " .. priceText
+end
+
+function bridge:_getJunkStatusText(bagId, slotIndex)
+    if not self:_shouldShowJunkStatusInTooltip() then
+        return nil
+    end
+
+    if type(IsItemJunk) ~= "function" then
+        return nil
+    end
+
+    local ok, isJunk = pcall(IsItemJunk, bagId, slotIndex)
+    if ok and isJunk == true then
+        return "Junk: Yes"
+    end
+
+    if type(CanItemBeMarkedAsJunk) == "function" then
+        local canMarkOk, canMark = pcall(CanItemBeMarkedAsJunk, bagId, slotIndex)
+        if canMarkOk and canMark == true then
+            return "Junk: No"
+        end
+    end
+
+    return nil
+end
+
+function bridge:_getBoundStatusText(bagId, slotIndex, itemLink)
+    if not self:_shouldShowBoundStatusInTooltip() then
+        return nil
+    end
+
+    local isBound = false
+    if type(IsItemBound) == "function" then
+        local ok, value = pcall(IsItemBound, bagId, slotIndex)
+        if ok and value == true then
+            isBound = true
+        end
+    end
+
+    if not isBound and type(IsItemLinkBound) == "function" and type(itemLink) == "string" then
+        local ok, value = pcall(IsItemLinkBound, itemLink)
+        if ok and value == true then
+            isBound = true
+        end
+    end
+
+    return isBound and "Bound: Yes" or nil
+end
+
+function bridge:_buildTooltipInfoLines(bagId, slotIndex)
+    local lines = {}
+    local itemLink = self:_getItemLinkFromBagAndSlot(bagId, slotIndex)
+
+    if self:_shouldShowTtcTooltipPrice() and itemLink then
+        local priceInfo = self:_getTtcPriceInfo(itemLink)
+        if type(priceInfo) == "table" then
+            local primaryPrice = priceInfo.SuggestedPrice or priceInfo.Avg or priceInfo.Min
+            local primaryPriceText = self:_formatTooltipInfoCurrency(primaryPrice)
+            if type(primaryPriceText) == "string" and primaryPriceText ~= "" then
+                lines[#lines + 1] = "TTC: " .. primaryPriceText
+            end
+
+            if self:_shouldShowTtcTooltipDetails() then
+                local minPriceText = self:_formatTooltipInfoCurrency(priceInfo.Min or primaryPrice)
+                local avgPriceText = self:_formatTooltipInfoCurrency(priceInfo.Avg or primaryPrice)
+                local maxPriceText = self:_formatTooltipInfoCurrency(priceInfo.Max or primaryPrice)
+                if minPriceText and avgPriceText and maxPriceText then
+                    lines[#lines + 1] = string.format("Min: %s  Avg: %s  Max: %s", minPriceText, avgPriceText, maxPriceText)
+                end
+
+                local listings = tonumber(priceInfo.EntryCount or 0) or 0
+                if listings > 0 then
+                    lines[#lines + 1] = string.format("Listings: %d", listings)
+                end
+            end
+        end
+    end
+
+    local junkStatus = self:_getJunkStatusText(bagId, slotIndex)
+    if junkStatus then
+        lines[#lines + 1] = junkStatus
+    end
+
+    local boundStatus = self:_getBoundStatusText(bagId, slotIndex, itemLink)
+    if boundStatus then
+        lines[#lines + 1] = boundStatus
+    end
+
+    local vendorPrice = self:_getVendorPriceText(bagId, slotIndex)
+    if vendorPrice then
+        lines[#lines + 1] = vendorPrice
+    end
+
+    return lines
+end
+
+function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex)
+    if type(tooltip) ~= "table" or type(tooltip.AddLine) ~= "function" then
+        return
+    end
+
+    local lines = self:_buildTooltipInfoLines(bagId, slotIndex)
+    if #lines == 0 then
+        return
+    end
+
+    local style = nil
+    if type(ZO_TOOLTIP_STYLES) == "table" then
+        style = ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.tooltipDefault
+    end
+
+    for i = 1, #lines do
+        if style ~= nil then
+            tooltip:AddLine(lines[i], style)
+        else
+            tooltip:AddLine(lines[i])
+        end
+    end
+
+    if style ~= nil then
+        tooltip:AddLine(" ", style)
+    else
+        tooltip:AddLine(" ")
+    end
+end
+
+function bridge:_hookTooltipPrice()
+    if self._tooltipPriceHooked then
+        return true
+    end
+
+    if type(GAMEPAD_TOOLTIPS) ~= "table" or type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
+        return false
+    end
+
+    local tooltipTypes = {
+        GAMEPAD_LEFT_TOOLTIP,
+        GAMEPAD_RIGHT_TOOLTIP,
+        GAMEPAD_MOVABLE_TOOLTIP,
+    }
+
+    local hookedAny = false
+    for i = 1, #tooltipTypes do
+        local tooltipType = tooltipTypes[i]
+        local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
+        if type(tooltip) == "table" and type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbTooltipWrapped then
+            local base = tooltip.LayoutBagItem
+            tooltip.LayoutBagItem = function(control, bagId, slotIndex, ...)
+                bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex)
+                return base(control, bagId, slotIndex, ...)
+            end
+            tooltip._lgcmbTooltipWrapped = true
+            hookedAny = true
+        end
+    end
+
+    if hookedAny then
+        self._tooltipPriceHooked = true
+        LogTrace("Tooltip info hook registered")
+        return true
+    end
+
+    return false
+end
+
+function bridge:_scheduleTooltipPriceHookRetry()
+    if self._tooltipPriceHooked then
+        return
+    end
+
+    if type(zo_callLater) == "function" then
+        zo_callLater(function()
+            bridge:_hookTooltipPrice()
+        end, 1500)
+    end
 end
 
 function bridge:_initializeSlashCommands()
@@ -796,6 +1181,69 @@ function bridge:_initializeSettingsPanel()
                 self:SetDebugVerbose(value)
             end,
             default = DEFAULTS.debugVerbose,
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = "Show TTC price in gamepad tooltip",
+            getFunc = function()
+                return self:_shouldShowTtcTooltipPrice()
+            end,
+            setFunc = function(value)
+                self:SetShowTtcPriceInTooltip(value)
+            end,
+            default = DEFAULTS.showTtcPriceInTooltip,
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = "Show expanded TTC details",
+            getFunc = function()
+                return self:_shouldShowTtcTooltipDetails()
+            end,
+            setFunc = function(value)
+                self:SetShowTtcPriceDetailsInTooltip(value)
+            end,
+            disabled = function()
+                return not self:_shouldShowTtcTooltipPrice()
+            end,
+            default = DEFAULTS.showTtcPriceDetailsInTooltip,
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = "Show junk status in gamepad tooltip",
+            getFunc = function()
+                return self:_shouldShowJunkStatusInTooltip()
+            end,
+            setFunc = function(value)
+                self:SetShowJunkStatusInTooltip(value)
+            end,
+            default = DEFAULTS.showJunkStatusInTooltip,
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = "Show vendor price in gamepad tooltip",
+            getFunc = function()
+                return self:_shouldShowVendorPriceInTooltip()
+            end,
+            setFunc = function(value)
+                self:SetShowVendorPriceInTooltip(value)
+            end,
+            default = DEFAULTS.showVendorPriceInTooltip,
+            width = "full",
+        },
+        {
+            type = "checkbox",
+            name = "Show bound status in gamepad tooltip",
+            getFunc = function()
+                return self:_shouldShowBoundStatusInTooltip()
+            end,
+            setFunc = function(value)
+                self:SetShowBoundStatusInTooltip(value)
+            end,
+            default = DEFAULTS.showBoundStatusInTooltip,
             width = "full",
         },
         {
@@ -1247,7 +1695,7 @@ function bridge:_showSubmenuDialog(submenuLabel, submenuEntries, submenuCallback
     })
 end
 
-function bridge:_appendEntriesToSlotActions(slotActions, entries)
+function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
     if type(slotActions) ~= "table" or type(slotActions.AddSlotAction) ~= "function" then
         return
     end
@@ -1305,6 +1753,11 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries)
         end
     end
 
+    local nativeJunkAction = self:_buildNativeJunkAction(inventorySlot)
+    if nativeJunkAction then
+        AddUniqueAction(nativeJunkAction.label, nativeJunkAction.callback)
+    end
+
     LogTrace(string.format("Injected %d actions from %d captured entries", addedCount, #entries))
 end
 
@@ -1329,8 +1782,8 @@ function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
         return
     end
 
-    if type(ZO_Inventory_GetBagAndIndex) == "function" then
-        local bagId, slotIndex = ZO_Inventory_GetBagAndIndex(inventorySlot)
+    do
+        local bagId, slotIndex = self:_resolveBagAndSlot(inventorySlot)
         if bagId == nil or slotIndex == nil then
             LogTrace("Skip inject: slot has no bag/slot index")
             return
@@ -1338,18 +1791,18 @@ function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
     end
 
     local lcm = LibCustomMenu
-    if type(lcm) ~= "table" then
-        LogTrace("Skip inject: LibCustomMenu missing")
-        return
+    local capturedEntries = {}
+    if type(lcm) == "table" then
+        capturedEntries = self:_runContextCallbacks(lcm, inventorySlot, slotActions) or {}
+    else
+        LogTrace("LibCustomMenu missing; injecting native fallback actions only")
     end
 
-    local capturedEntries = self:_runContextCallbacks(lcm, inventorySlot, slotActions)
-    if not capturedEntries or #capturedEntries == 0 then
-        LogTrace("No entries captured for this slot")
-        return
+    if #capturedEntries == 0 then
+        LogTrace("No LibCustomMenu entries captured for this slot")
     end
 
-    self:_appendEntriesToSlotActions(slotActions, capturedEntries)
+    self:_appendEntriesToSlotActions(slotActions, capturedEntries, inventorySlot)
 end
 
 function bridge:_hookDiscoverSlotActions()
@@ -1357,13 +1810,17 @@ function bridge:_hookDiscoverSlotActions()
         return
     end
 
-    if type(ZO_PostHook) ~= "function" then
+    if type(SecurePostHook) == "function" then
+        SecurePostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
+            bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
+        end)
+    elseif type(ZO_PostHook) == "function" then
+        ZO_PostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
+            bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
+        end)
+    else
         return
     end
-
-    ZO_PostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
-        bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
-    end)
 
     self._discoverHooked = true
 end
@@ -1373,14 +1830,13 @@ function bridge:_hookRefreshKeybindStrip()
         return
     end
 
-    if type(ZO_PostHook) ~= "function" then
-        return
-    end
     if type(ZO_ItemSlotActionsController) ~= "table" then
         return
     end
 
-    ZO_PostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", function(controller)
+    local hookInstalled = false
+
+    local function OnRefreshKeybindStrip(controller)
         if not controller or type(controller) ~= "table" then
             return
         end
@@ -1395,7 +1851,19 @@ function bridge:_hookRefreshKeybindStrip()
         if inventorySlot and slotActions then
             bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
         end
-    end)
+    end
+
+    if type(SecurePostHook) == "function" then
+        SecurePostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", OnRefreshKeybindStrip)
+        hookInstalled = true
+    elseif type(ZO_PostHook) == "function" then
+        ZO_PostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", OnRefreshKeybindStrip)
+        hookInstalled = true
+    end
+
+    if not hookInstalled then
+        return
+    end
 
     self._refreshHooked = true
 end
@@ -1419,12 +1887,15 @@ function bridge:Initialize()
     self:_importExistingCallbacks(lcm)
     self:_hookDiscoverSlotActions()
     self:_hookRefreshKeybindStrip()
+    self:_hookTooltipPrice()
+    self:_scheduleTooltipPriceHookRetry()
 
     self._initialized = true
     LogDebug("Initialized")
 end
 
 local EVENT_NAMESPACE = MAJOR .. "_OnLoaded"
+local PLAYER_ACTIVATED_EVENT_NAMESPACE = MAJOR .. "_PlayerActivated"
 
 local function OnAddonLoaded(_, addonName)
     if addonName ~= MAJOR then
@@ -1436,3 +1907,7 @@ local function OnAddonLoaded(_, addonName)
 end
 
 EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_ADD_ON_LOADED, OnAddonLoaded)
+EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
+    bridge:_hookTooltipPrice()
+    bridge:_scheduleTooltipPriceHookRetry()
+end)
