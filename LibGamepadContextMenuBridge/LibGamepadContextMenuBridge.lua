@@ -1,5 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
 local MINOR = 3
+local ADDON_VERSION = "1.4.1"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -24,6 +25,7 @@ bridge._submenuDialogName = bridge._submenuDialogName or (MAJOR .. "_SubmenuDial
 bridge._settingsPanelRegistered = bridge._settingsPanelRegistered or false
 bridge._slashCommandsRegistered = bridge._slashCommandsRegistered or false
 bridge._tooltipPriceHooked = bridge._tooltipPriceHooked or false
+bridge._playerActivatedHookRegistered = bridge._playerActivatedHookRegistered or false
 bridge._debugLog = bridge._debugLog or {}
 bridge._stringIdByLabel = bridge._stringIdByLabel or {}
 bridge._nextStringIdIndex = bridge._nextStringIdIndex or 1
@@ -182,10 +184,18 @@ local function SafeGetTargetData(entryList)
 end
 
 local function ResolveCategory(lcm, category)
-    local early = lcm and lcm.CATEGORY_EARLY or 1
-    local late = lcm and lcm.CATEGORY_LATE or 6
+    local early = lcm and tonumber(lcm.CATEGORY_EARLY) or nil
+    local late = lcm and tonumber(lcm.CATEGORY_LATE) or nil
 
-    category = tonumber(category) or late
+    category = tonumber(category) or late or early
+
+    if category == nil then
+        return nil
+    end
+
+    if early == nil or late == nil then
+        return category
+    end
 
     if type(zo_clamp) == "function" then
         return zo_clamp(category, early, late)
@@ -384,8 +394,11 @@ function bridge:_summarizeContextRegistry()
         return err or "unavailable", 0
     end
 
-    local early = (LibCustomMenu and LibCustomMenu.CATEGORY_EARLY) or 1
-    local late = (LibCustomMenu and LibCustomMenu.CATEGORY_LATE) or 6
+    local early = LibCustomMenu and tonumber(LibCustomMenu.CATEGORY_EARLY) or nil
+    local late = LibCustomMenu and tonumber(LibCustomMenu.CATEGORY_LATE) or nil
+    if early == nil or late == nil then
+        return "category bounds unavailable", 0
+    end
     local parts = {}
     local total = 0
     for category = early, late do
@@ -405,8 +418,11 @@ function bridge:_invokeRawRegistryHandlers(lcm, inventorySlot, slotActions)
         return 0
     end
 
-    local early = lcm.CATEGORY_EARLY or 1
-    local late = lcm.CATEGORY_LATE or 6
+    local early = tonumber(lcm.CATEGORY_EARLY)
+    local late = tonumber(lcm.CATEGORY_LATE)
+    if early == nil or late == nil then
+        return 0
+    end
     local invoked = 0
 
     for category = early, late do
@@ -777,16 +793,51 @@ function bridge:_getTtcPriceInfo(itemLink)
         return nil
     end
 
-    if type(TamrielTradeCentrePrice) ~= "table" or type(TamrielTradeCentrePrice.GetPriceInfo) ~= "function" then
-        return nil
+    local providers = {
+        _G.TamrielTradeCentrePrice,
+        type(TamrielTradeCentre) == "table" and TamrielTradeCentre.Price or nil,
+    }
+
+    for i = 1, #providers do
+        local provider = providers[i]
+        if type(provider) == "table" and type(provider.GetPriceInfo) == "function" then
+            local ok, priceInfo = pcall(provider.GetPriceInfo, provider, itemLink)
+            if ok and type(priceInfo) == "table" then
+                return {
+                    Avg = priceInfo.Avg or priceInfo.A,
+                    Max = priceInfo.Max or priceInfo.X,
+                    Min = priceInfo.Min or priceInfo.N,
+                    EntryCount = priceInfo.EntryCount or priceInfo.EC,
+                    AmountCount = priceInfo.AmountCount or priceInfo.AC,
+                    SuggestedPrice = priceInfo.SuggestedPrice or priceInfo.S,
+                    SaleAvg = priceInfo.SaleAvg or priceInfo.SA,
+                    SaleEntryCount = priceInfo.SaleEntryCount or priceInfo.SE,
+                    SaleAmountCount = priceInfo.SaleAmountCount or priceInfo.SAC,
+                }
+            end
+        end
     end
 
-    local ok, priceInfo = pcall(TamrielTradeCentrePrice.GetPriceInfo, TamrielTradeCentrePrice, itemLink)
-    if not ok then
-        return nil
+    return nil
+end
+
+function bridge:_getTtcPriceTableUpdatedText()
+    local providers = {
+        _G.TamrielTradeCentrePrice,
+        type(TamrielTradeCentre) == "table" and TamrielTradeCentre.Price or nil,
+    }
+
+    for i = 1, #providers do
+        local provider = providers[i]
+        if type(provider) == "table" and type(provider.GetPriceTableUpdatedDateString) == "function" then
+            local ok, updatedText = pcall(provider.GetPriceTableUpdatedDateString, provider)
+            if ok and type(updatedText) == "string" and updatedText ~= "" then
+                return updatedText
+            end
+        end
     end
 
-    return priceInfo
+    return nil
 end
 
 function bridge:_formatTtcCurrency(value)
@@ -929,8 +980,33 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
                 end
 
                 local listings = tonumber(priceInfo.EntryCount or 0) or 0
+                local listedItems = tonumber(priceInfo.AmountCount or listings) or listings
                 if listings > 0 then
-                    lines[#lines + 1] = string.format("Listings: %d", listings)
+                    if listedItems ~= listings then
+                        lines[#lines + 1] = string.format("Listings: %d  Items: %d", listings, listedItems)
+                    else
+                        lines[#lines + 1] = string.format("Listings: %d", listings)
+                    end
+                end
+
+                local saleAvgText = self:_formatTooltipInfoCurrency(priceInfo.SaleAvg)
+                if saleAvgText then
+                    lines[#lines + 1] = "Sale Avg: " .. saleAvgText
+                end
+
+                local sales = tonumber(priceInfo.SaleEntryCount or 0) or 0
+                local soldItems = tonumber(priceInfo.SaleAmountCount or sales) or sales
+                if sales > 0 then
+                    if soldItems ~= sales then
+                        lines[#lines + 1] = string.format("Sales: %d  Items: %d", sales, soldItems)
+                    else
+                        lines[#lines + 1] = string.format("Sales: %d", sales)
+                    end
+                end
+
+                local updatedText = self:_getTtcPriceTableUpdatedText()
+                if updatedText then
+                    lines[#lines + 1] = updatedText
                 end
             end
         end
@@ -1006,8 +1082,9 @@ function bridge:_hookTooltipPrice()
         if type(tooltip) == "table" and type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbTooltipWrapped then
             local base = tooltip.LayoutBagItem
             tooltip.LayoutBagItem = function(control, bagId, slotIndex, ...)
+                local result1, result2, result3, result4, result5, result6 = base(control, bagId, slotIndex, ...)
                 bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex)
-                return base(control, bagId, slotIndex, ...)
+                return result1, result2, result3, result4, result5, result6
             end
             tooltip._lgcmbTooltipWrapped = true
             hookedAny = true
@@ -1137,7 +1214,7 @@ function bridge:_initializeSettingsPanel()
         name = MAJOR,
         displayName = MAJOR,
         author = "pc243, Codex",
-        version = "1.3.3",
+        version = ADDON_VERSION,
         registerForRefresh = true,
         registerForDefaults = true,
     }
@@ -1454,8 +1531,11 @@ function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
     local originalContextMenuMode = slotActions and slotActions.m_contextMenuMode
 
     local ok, err = pcall(function()
-        local early = lcm.CATEGORY_EARLY or 1
-        local late = lcm.CATEGORY_LATE or 6
+        local early = tonumber(lcm.CATEGORY_EARLY)
+        local late = tonumber(lcm.CATEGORY_LATE)
+        if early == nil or late == nil then
+            return
+        end
         local contextMenuRegistry = lcm.contextMenuRegistry
         local hasFireCallbacks = type(contextMenuRegistry) == "table" and type(contextMenuRegistry.FireCallbacks) == "function"
         local summary, totalCallbacks = self:_summarizeContextRegistry()
@@ -1889,6 +1969,7 @@ function bridge:Initialize()
     self:_hookRefreshKeybindStrip()
     self:_hookTooltipPrice()
     self:_scheduleTooltipPriceHookRetry()
+    self:_registerPlayerActivatedHook()
 
     self._initialized = true
     LogDebug("Initialized")
@@ -1896,6 +1977,30 @@ end
 
 local EVENT_NAMESPACE = MAJOR .. "_OnLoaded"
 local PLAYER_ACTIVATED_EVENT_NAMESPACE = MAJOR .. "_PlayerActivated"
+
+function bridge:_registerPlayerActivatedHook()
+    if self._playerActivatedHookRegistered then
+        return
+    end
+
+    if type(EVENT_MANAGER) ~= "table" or type(EVENT_MANAGER.RegisterForEvent) ~= "function" then
+        return
+    end
+
+    EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
+        local hooked = bridge:_hookTooltipPrice()
+        if not hooked then
+            bridge:_scheduleTooltipPriceHookRetry()
+            return
+        end
+
+        if type(EVENT_MANAGER.UnregisterForEvent) == "function" then
+            EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
+        end
+    end)
+
+    self._playerActivatedHookRegistered = true
+end
 
 local function OnAddonLoaded(_, addonName)
     if addonName ~= MAJOR then
@@ -1907,7 +2012,3 @@ local function OnAddonLoaded(_, addonName)
 end
 
 EVENT_MANAGER:RegisterForEvent(EVENT_NAMESPACE, EVENT_ADD_ON_LOADED, OnAddonLoaded)
-EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
-    bridge:_hookTooltipPrice()
-    bridge:_scheduleTooltipPriceHookRetry()
-end)

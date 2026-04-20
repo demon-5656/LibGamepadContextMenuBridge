@@ -19,9 +19,11 @@ mkdir -p "$DIST_DIR"
 BASENAME="LibGamepadContextMenuBridge-v${VERSION}"
 
 if command -v zip >/dev/null 2>&1; then
+  rm -f "$DIST_DIR/${BASENAME}.zip"
   (cd "$ROOT_DIR" && zip -r "$DIST_DIR/${BASENAME}.zip" "LibGamepadContextMenuBridge" >/dev/null)
   echo "Built: $DIST_DIR/${BASENAME}.zip"
 else
+  rm -f "$DIST_DIR/${BASENAME}.tar.gz"
   (cd "$ROOT_DIR" && tar -czf "$DIST_DIR/${BASENAME}.tar.gz" "LibGamepadContextMenuBridge")
   echo "Built: $DIST_DIR/${BASENAME}.tar.gz"
 fi
