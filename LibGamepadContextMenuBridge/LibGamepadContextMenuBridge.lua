@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 3
-local ADDON_VERSION = "1.4.1"
+local MINOR = 143
+local ADDON_VERSION = "1.4.3"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -29,6 +29,10 @@ bridge._playerActivatedHookRegistered = bridge._playerActivatedHookRegistered or
 bridge._debugLog = bridge._debugLog or {}
 bridge._stringIdByLabel = bridge._stringIdByLabel or {}
 bridge._nextStringIdIndex = bridge._nextStringIdIndex or 1
+bridge._tooltipTtcCache = bridge._tooltipTtcCache or {}
+bridge._formattedTooltipLineCache = bridge._formattedTooltipLineCache or {}
+bridge._tooltipTtcCacheSize = bridge._tooltipTtcCacheSize or 0
+bridge._formattedTooltipLineCacheSize = bridge._formattedTooltipLineCacheSize or 0
 
 local SAVED_VARS_NAME = MAJOR .. "_SavedVars"
 local SAVED_VARS_VERSION = 1
@@ -845,6 +849,8 @@ function bridge:_formatTtcCurrency(value)
         return nil
     end
 
+    value = math.floor(value + 0.5)
+
     if type(ZO_CurrencyControl_FormatCurrency) == "function" then
         local ok, formatted = pcall(ZO_CurrencyControl_FormatCurrency, value, true, nil)
         if ok and type(formatted) == "string" and formatted ~= "" then
@@ -864,6 +870,91 @@ end
 
 function bridge:_formatTooltipInfoCurrency(value)
     return self:_formatTtcCurrency(value)
+end
+
+function bridge:_formatCompactTooltipCurrency(value)
+    if type(value) ~= "number" then
+        return nil
+    end
+
+    value = math.floor(value + 0.5)
+
+    local suffix = nil
+    local scaled = value
+    if value >= 1000000 then
+        scaled = value / 1000000
+        suffix = "кк"
+    elseif value >= 1000 then
+        scaled = value / 1000
+        suffix = "к"
+    end
+
+    if not suffix then
+        return tostring(value)
+    end
+
+    local precision = scaled >= 10 and 0 or 1
+    local text = string.format("%0." .. tostring(precision) .. "f", scaled)
+    text = text:gsub("([%.%,]0+)$", "")
+    text = text:gsub("%.$", "")
+    text = text:gsub("%,$", "")
+    return text .. suffix
+end
+
+function bridge:_getTooltipTtcCacheKey(itemLink)
+    if type(itemLink) ~= "string" or itemLink == "" then
+        return nil
+    end
+
+    return table.concat({
+        itemLink,
+        tostring(self:_shouldShowTtcTooltipPrice()),
+        tostring(self:_shouldShowTtcTooltipDetails()),
+    }, "|")
+end
+
+function bridge:_getCachedTtcTooltipLines(itemLink)
+    local cacheKey = self:_getTooltipTtcCacheKey(itemLink)
+    if not cacheKey then
+        return nil
+    end
+
+    local cached = self._tooltipTtcCache[cacheKey]
+    if cached ~= nil then
+        return cached
+    end
+
+    local lines = {}
+    if self:_shouldShowTtcTooltipPrice() then
+        local priceInfo = self:_getTtcPriceInfo(itemLink)
+        if type(priceInfo) == "table" then
+            local primaryPrice = priceInfo.SuggestedPrice or priceInfo.Avg or priceInfo.Min
+            local primaryPriceText = self:_formatTooltipInfoCurrency(primaryPrice)
+            if type(primaryPriceText) == "string" and primaryPriceText ~= "" then
+                lines[#lines + 1] = "TTC: " .. primaryPriceText
+            end
+
+            if self:_shouldShowTtcTooltipDetails() then
+                local minPriceText = self:_formatCompactTooltipCurrency(priceInfo.Min or primaryPrice)
+                local avgPriceText = self:_formatCompactTooltipCurrency(priceInfo.Avg or primaryPrice)
+                local maxPriceText = self:_formatCompactTooltipCurrency(priceInfo.Max or primaryPrice)
+                if minPriceText and avgPriceText and maxPriceText then
+                    lines[#lines + 1] = string.format("Min/Avg/Max: %s / %s / %s", minPriceText, avgPriceText, maxPriceText)
+                end
+            end
+        end
+    end
+
+    if self._tooltipTtcCache[cacheKey] == nil then
+        self._tooltipTtcCacheSize = (self._tooltipTtcCacheSize or 0) + 1
+        if self._tooltipTtcCacheSize > 256 then
+            self._tooltipTtcCache = {}
+            self._tooltipTtcCacheSize = 0
+        end
+    end
+
+    self._tooltipTtcCache[cacheKey] = lines
+    return lines
 end
 
 function bridge:_getItemLinkFromBagAndSlot(bagId, slotIndex)
@@ -961,53 +1052,11 @@ end
 function bridge:_buildTooltipInfoLines(bagId, slotIndex)
     local lines = {}
     local itemLink = self:_getItemLinkFromBagAndSlot(bagId, slotIndex)
-
-    if self:_shouldShowTtcTooltipPrice() and itemLink then
-        local priceInfo = self:_getTtcPriceInfo(itemLink)
-        if type(priceInfo) == "table" then
-            local primaryPrice = priceInfo.SuggestedPrice or priceInfo.Avg or priceInfo.Min
-            local primaryPriceText = self:_formatTooltipInfoCurrency(primaryPrice)
-            if type(primaryPriceText) == "string" and primaryPriceText ~= "" then
-                lines[#lines + 1] = "TTC: " .. primaryPriceText
-            end
-
-            if self:_shouldShowTtcTooltipDetails() then
-                local minPriceText = self:_formatTooltipInfoCurrency(priceInfo.Min or primaryPrice)
-                local avgPriceText = self:_formatTooltipInfoCurrency(priceInfo.Avg or primaryPrice)
-                local maxPriceText = self:_formatTooltipInfoCurrency(priceInfo.Max or primaryPrice)
-                if minPriceText and avgPriceText and maxPriceText then
-                    lines[#lines + 1] = string.format("Min: %s  Avg: %s  Max: %s", minPriceText, avgPriceText, maxPriceText)
-                end
-
-                local listings = tonumber(priceInfo.EntryCount or 0) or 0
-                local listedItems = tonumber(priceInfo.AmountCount or listings) or listings
-                if listings > 0 then
-                    if listedItems ~= listings then
-                        lines[#lines + 1] = string.format("Listings: %d  Items: %d", listings, listedItems)
-                    else
-                        lines[#lines + 1] = string.format("Listings: %d", listings)
-                    end
-                end
-
-                local saleAvgText = self:_formatTooltipInfoCurrency(priceInfo.SaleAvg)
-                if saleAvgText then
-                    lines[#lines + 1] = "Sale Avg: " .. saleAvgText
-                end
-
-                local sales = tonumber(priceInfo.SaleEntryCount or 0) or 0
-                local soldItems = tonumber(priceInfo.SaleAmountCount or sales) or sales
-                if sales > 0 then
-                    if soldItems ~= sales then
-                        lines[#lines + 1] = string.format("Sales: %d  Items: %d", sales, soldItems)
-                    else
-                        lines[#lines + 1] = string.format("Sales: %d", sales)
-                    end
-                end
-
-                local updatedText = self:_getTtcPriceTableUpdatedText()
-                if updatedText then
-                    lines[#lines + 1] = updatedText
-                end
+    if itemLink then
+        local ttcLines = self:_getCachedTtcTooltipLines(itemLink)
+        if type(ttcLines) == "table" then
+            for i = 1, #ttcLines do
+                lines[#lines + 1] = ttcLines[i]
             end
         end
     end
@@ -1018,43 +1067,105 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
     end
 
     local boundStatus = self:_getBoundStatusText(bagId, slotIndex, itemLink)
-    if boundStatus then
-        lines[#lines + 1] = boundStatus
-    end
-
     local vendorPrice = self:_getVendorPriceText(bagId, slotIndex)
     if vendorPrice then
         lines[#lines + 1] = vendorPrice
     end
 
+    if boundStatus then
+        lines[#lines + 1] = boundStatus
+    end
+
     return lines
 end
 
-function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex)
-    if type(tooltip) ~= "table" or type(tooltip.AddLine) ~= "function" then
-        return
+local function FormatTooltipLine(text)
+    if type(text) ~= "string" or text == "" then
+        return text
     end
 
+    local cached = bridge._formattedTooltipLineCache[text]
+    if cached ~= nil then
+        return cached
+    end
+
+    local formatted = nil
+
+    if text:match("^TTC:%s") then
+        formatted = "|cD8C06A" .. text .. "|r"
+    elseif text:match("^Vendor:%s") then
+        formatted = "|cC9B36B" .. text .. "|r"
+    elseif text:match("^Junk:%s") then
+        local junkValue = text:match("^Junk:%s*(.+)$")
+        if junkValue == "Yes" then
+            formatted = "|cB088D9" .. text .. "|r"
+        else
+            formatted = "|cF0F0F0" .. text .. "|r"
+        end
+    elseif text:match("^Min/Avg/Max:%s") then
+        formatted = "|c9F9780" .. text .. "|r"
+    elseif text:match("^Bound:%s") then
+        formatted = "|cA7A7A7" .. text .. "|r"
+    else
+        formatted = "|cB8B29A" .. text .. "|r"
+    end
+
+    if bridge._formattedTooltipLineCache[text] == nil then
+        bridge._formattedTooltipLineCacheSize = (bridge._formattedTooltipLineCacheSize or 0) + 1
+        if bridge._formattedTooltipLineCacheSize > 128 then
+            bridge._formattedTooltipLineCache = {}
+            bridge._formattedTooltipLineCacheSize = 0
+        end
+    end
+
+    bridge._formattedTooltipLineCache[text] = formatted
+    return formatted
+end
+
+function bridge:_getTooltipInfoStyle(text)
+    if type(ZO_TOOLTIP_STYLES) ~= "table" then
+        return nil
+    end
+
+    return ZO_TOOLTIP_STYLES.tooltipDefault or ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.bodySection
+end
+
+function bridge:_getTooltipCompactStyle()
+    if type(ZO_TOOLTIP_STYLES) ~= "table" then
+        return nil
+    end
+
+    return ZO_TOOLTIP_STYLES.tooltipDefault or ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.bodySection
+end
+
+function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex)
+    if tooltip == nil then
+        return
+    end
+    
+    if type(tooltip.AddLine) ~= "function" then
+        return
+    end
+    
     local lines = self:_buildTooltipInfoLines(bagId, slotIndex)
+    
     if #lines == 0 then
         return
     end
 
-    local style = nil
-    if type(ZO_TOOLTIP_STYLES) == "table" then
-        style = ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.tooltipDefault
-    end
-
     for i = 1, #lines do
+        local style = i == 1 and self:_getTooltipCompactStyle() or self:_getTooltipInfoStyle(lines[i])
+        local formattedLine = FormatTooltipLine(lines[i])
         if style ~= nil then
-            tooltip:AddLine(lines[i], style)
+            tooltip:AddLine(formattedLine, style)
         else
-            tooltip:AddLine(lines[i])
+            tooltip:AddLine(formattedLine)
         end
     end
 
-    if style ~= nil then
-        tooltip:AddLine(" ", style)
+    local spacerStyle = self:_getTooltipCompactStyle()
+    if spacerStyle ~= nil then
+        tooltip:AddLine(" ", spacerStyle)
     else
         tooltip:AddLine(" ")
     end
@@ -1065,7 +1176,15 @@ function bridge:_hookTooltipPrice()
         return true
     end
 
-    if type(GAMEPAD_TOOLTIPS) ~= "table" or type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
+    LogTrace("Attempting to hook tooltip price...")
+    
+    if type(GAMEPAD_TOOLTIPS) ~= "table" then
+        LogTrace("GAMEPAD_TOOLTIPS not available (type: " .. type(GAMEPAD_TOOLTIPS) .. ")")
+        return false
+    end
+    
+    if type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
+        LogTrace("GAMEPAD_TOOLTIPS.GetTooltip not available")
         return false
     end
 
@@ -1078,25 +1197,55 @@ function bridge:_hookTooltipPrice()
     local hookedAny = false
     for i = 1, #tooltipTypes do
         local tooltipType = tooltipTypes[i]
+        LogTrace("Checking tooltip type " .. tostring(i) .. ": " .. tostring(tooltipType))
+        
         local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
-        if type(tooltip) == "table" and type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbTooltipWrapped then
-            local base = tooltip.LayoutBagItem
-            tooltip.LayoutBagItem = function(control, bagId, slotIndex, ...)
-                local result1, result2, result3, result4, result5, result6 = base(control, bagId, slotIndex, ...)
-                bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex)
-                return result1, result2, result3, result4, result5, result6
+        LogTrace("Got tooltip: " .. type(tooltip))
+        
+        if tooltip ~= nil then
+            LogTrace("Tooltip has LayoutBagItem: " .. tostring(type(tooltip.LayoutBagItem)))
+            LogTrace("Already wrapped: " .. tostring(tooltip._lgcmbTooltipWrapped))
+            
+            if type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbTooltipWrapped then
+                local base = tooltip.LayoutBagItem
+                tooltip.LayoutBagItem = function(control, bagId, slotIndex, ...)
+                    local result1, result2, result3, result4, result5, result6 = base(control, bagId, slotIndex, ...)
+                    bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex)
+                    LogTrace("Base LayoutBagItem called")
+                    return result1, result2, result3, result4, result5, result6
+                end
+                tooltip._lgcmbTooltipWrapped = true
+                hookedAny = true
+                LogTrace("Successfully hooked tooltip type " .. tostring(i))
             end
-            tooltip._lgcmbTooltipWrapped = true
-            hookedAny = true
         end
+    end
+
+    if type(GAMEPAD_INVENTORY) == "table"
+        and type(GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip) == "function"
+        and not GAMEPAD_INVENTORY._lgcmbTooltipCategoryWrapped
+    then
+        local updateCategoryLeftTooltip = GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip
+        GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip = function(control, ...)
+            local result = updateCategoryLeftTooltip(control, ...)
+            if control and control.selectedEquipSlot and type(GAMEPAD_TOOLTIPS.LayoutBagItem) == "function" then
+                GAMEPAD_TOOLTIPS:LayoutBagItem(GAMEPAD_LEFT_TOOLTIP, BAG_WORN, control.selectedEquipSlot)
+                LogTrace("Refreshed left tooltip for selected equipped slot")
+            end
+            return result
+        end
+        GAMEPAD_INVENTORY._lgcmbTooltipCategoryWrapped = true
+        hookedAny = true
+        LogTrace("Hooked GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip")
     end
 
     if hookedAny then
         self._tooltipPriceHooked = true
-        LogTrace("Tooltip info hook registered")
+        LogDebug("Tooltip info hook registered successfully")
         return true
     end
 
+    LogTrace("No tooltips were hooked")
     return false
 end
 
@@ -1106,9 +1255,11 @@ function bridge:_scheduleTooltipPriceHookRetry()
     end
 
     if type(zo_callLater) == "function" then
+        LogTrace("Scheduling tooltip price hook retry in 2500ms")
         zo_callLater(function()
+            LogTrace("Retrying tooltip price hook...")
             bridge:_hookTooltipPrice()
-        end, 1500)
+        end, 2500)
     end
 end
 
@@ -1967,7 +2118,15 @@ function bridge:Initialize()
     self:_importExistingCallbacks(lcm)
     self:_hookDiscoverSlotActions()
     self:_hookRefreshKeybindStrip()
-    self:_hookTooltipPrice()
+    
+    -- Попытка подцепить тултипы
+    local tooltipHookSuccess = self:_hookTooltipPrice()
+    if not tooltipHookSuccess then
+        LogDebug("Initial tooltip hook failed, scheduling retry...")
+        self:_scheduleTooltipPriceHookRetry()
+    end
+    
+    -- Дополнительная попытка в EVENT_PLAYER_ACTIVATED
     self:_scheduleTooltipPriceHookRetry()
     self:_registerPlayerActivatedHook()
 

@@ -5,6 +5,10 @@ Standalone ESO library addon repository.
 This library mirrors inventory actions registered via `LibCustomMenu:RegisterContextMenu(...)` into gamepad action lists.
 It allows keyboard/mouse context actions from compatible addons to be used in gamepad mode.
 
+It also includes optional quality-of-life additions for gamepad inventory users:
+- native `Mark as Junk` / `Unmark as Junk` fallback when the base gamepad menu does not expose the junk action
+- optional tooltip info block for TTC price, TTC detail summary, junk status, bound status, and vendor value
+
 ## How the bridge behaves
 1. Hooks `LibCustomMenu:RegisterContextMenu(...)` and stores context callbacks.
 2. On gamepad item-action refresh, rebuilds custom context entries for the current slot.
@@ -30,6 +34,7 @@ It allows keyboard/mouse context actions from compatible addons to be used in ga
 ## Dependencies
 - Required: `LibCustomMenu>=730`
 - Optional: `LibAddonMenu-2.0` (settings panel)
+- Optional for price display: `TamrielTradeCentre`
 
 ## Install (manual)
 Copy the folder below into your ESO AddOns directory:
