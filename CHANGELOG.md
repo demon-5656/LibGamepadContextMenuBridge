@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.5.1
+- Переход с внедрения данных в нативные тултипы на отдельные overlay-окна (overlay system).
+- Реализован `_ensureOverlayWindow`: создание top-level окна с backdrop, accent-backdrop и рамкой из 4 полос (gold, 0.72/0.66/0.42).
+- Реализован `_ensureOverlayLineLabels`: динамическое создание строковых label-контролов с anchor-цепочкой.
+- Реализован `_renderOverlayLines`: посрочная отрисовка с управлением высотой скрытых строк.
+- Реализован `_resizeOverlayToText`: адаптивная ширина/высота окна по source (bag/guildstore/furncraft) и размеру тултипа.
+- Реализован `_positionOverlay`: якорение overlay внутри/под активным тултипом с source-специфичными insets.
+- Реализован `_refreshOverlayVisibility`: OnUpdate-охранник через singleton-closure (`_onRefreshOverlay`) с 100ms throttle.
+- Реализован `_buildCompactOverlayLines`: компактное представление TTC/MinAvgMax/StackTotal/Vendor/Junk/vsTTC.
+- Реализован `_scheduleOverlayShowRetry`: повторные попытки показа overlay (до 6×40ms) до готовности тултипа-якоря.
+- Все источники (bag, guildstore, furncraft) переведены на overlay вместо `AddLine`/`AddVerticalPadding` в тултип.
+
+## 1.4.6
+- Removed redundant `if bridge.debug then` guards around `LogDebug` calls in `_hookTradingHouseTooltip` (LogDebug already checks `self.debug` internally).
+- Removed dead `local itemLink` assignment in `_appendGamepadTooltipInfo` (value was computed but never used).
+- Fixed indentation of two `if` blocks inside the A3 scan loop in `_lookupTradingHouseListingPrice`.
+- Fixed indentation of the `if submenuLabel ~= "" then` body in `_ensureSubmenuDialog`.
+- Eliminated per-show closure allocation for the overlay OnUpdate handler: handler is now created once and reused, reducing GC pressure during rapid item selection in the Trading House.
+
 ## 1.4.5
 - Fixed crafting-station tooltip info (TTC price, bound status) never appearing in gamepad mode.
   `_hookCraftingTooltips()` was defined but never called from `Initialize()` — now it is.

@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 145
-local ADDON_VERSION = "1.4.5"
+local MINOR = 151
+local ADDON_VERSION = "1.5.1"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -963,7 +963,7 @@ function bridge:DumpRuntimeStatus()
         tostring(self.enabled),
         tostring(self.debug),
         tostring(self.debugVerbose),
-        tostring(true),
+        tostring(overlayVisible),
         tostring(self._initialized)
     ))
     d(string.format(
@@ -1032,11 +1032,11 @@ function bridge:_shouldShowTtcTooltipDetails()
 end
 
 function bridge:_shouldShowJunkStatusInTooltip()
-    return not not (self.savedVars and self.savedVars.showJunkStatusInTooltip ~= false)
+    return not not (not self.savedVars or self.savedVars.showJunkStatusInTooltip ~= false)
 end
 
 function bridge:_shouldShowVendorPriceInTooltip()
-    return not not (self.savedVars and self.savedVars.showVendorPriceInTooltip ~= false)
+    return not not (not self.savedVars or self.savedVars.showVendorPriceInTooltip ~= false)
 end
 
 function bridge:_shouldShowTemplateCraftingOverlay()
@@ -1819,10 +1819,8 @@ function bridge:_refreshOverlayVisibility()
         return
     end
 
-    if not self:_shouldKeepOverlayVisible() then
-        self:_hideOverlay()
-        LogTrace("Overlay hidden by visibility guard")
-    end
+    self:_hideOverlay()
+    LogTrace("Overlay hidden by visibility guard")
 end
 
 function bridge:_resizeOverlayToText(overlay)
@@ -2052,7 +2050,7 @@ function bridge:_buildCompactOverlayLines(lines, source)
         AppendIfValue(compact, info.junk == "Yes" and "|cB088D9Junk: Yes|r" or nil)
         AppendIfValue(compact, BuildCompactVersusTtcLine(info.versusTtc))
 
-        if #compact > 0 or info.junk ~= nil then
+        if #compact > 0 then
             return compact
         end
     end
@@ -2142,9 +2140,12 @@ function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount)
     end
 
     if type(overlay.window.SetHandler) == "function" then
-        overlay.window:SetHandler("OnUpdate", function()
-            bridge:_refreshOverlayVisibility()
-        end)
+        if not bridge._onRefreshOverlay then
+            bridge._onRefreshOverlay = function()
+                bridge:_refreshOverlayVisibility()
+            end
+        end
+        overlay.window:SetHandler("OnUpdate", bridge._onRefreshOverlay)
     end
     overlay.window:SetHidden(false)
     LogDebug(string.format("Overlay shown: source=%s lines=%d", tostring(source), #lines))
@@ -2155,11 +2156,8 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
         return
     end
 
-    -- Always log to diagnose stackCount issue (gated by self.debug flag)
-    if self.debug and type(d) == "function" then
-        d("[LGCMB] _appendByLink: " .. tostring(itemLink):sub(1, 50))
-        d("[LGCMB]   sc=" .. tostring(stackCount) .. " price=" .. tostring(listingPrice))
-    end
+    LogTrace("_appendByLink: " .. tostring(itemLink):sub(1, 50)
+        .. " sc=" .. tostring(stackCount) .. " price=" .. tostring(listingPrice))
 
     -- Dedup: include stackCount/listingPrice in key so same item at different TH prices
     -- doesn't get skipped within the 200ms window.
@@ -2189,7 +2187,6 @@ function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
         return
     end
 
-    local itemLink = self:_getItemLinkFromBagAndSlot(bagId, slotIndex)
     self:_showOverlayLines(lines, source, tooltip)
 end
 
@@ -2214,9 +2211,7 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
                    or nil
 
     if not getInfoFn then
-        if bridge.debug and type(d) == "function" then
-            d("[LGCMB] lookup: no item-info API found")
-        end
+        LogTrace("lookup: no item-info API found")
         return nil, nil
     end
 
@@ -2254,9 +2249,7 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
 
                 if type(dataLink) == "string" and dataLink:find("|H") and dataLink == itemLink
                    and type(dataSc) == "number" and type(dataPrice) == "number" then
-                    if bridge.debug and type(d) == "function" then
-                        d("[LGCMB] lookup: A1 from data fields sc=" .. tostring(dataSc) .. " price=" .. tostring(dataPrice))
-                    end
+                    LogTrace("lookup: A1 from data fields sc=" .. tostring(dataSc) .. " price=" .. tostring(dataPrice))
                     return dataPrice, dataSc
                 end
 
@@ -2271,44 +2264,36 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
                         slotLink = dataLink  -- use data.itemLink as verification source
                     end
                     local linkMatches = (slotLink == itemLink)
-                    if bridge.debug and type(d) == "function" then
-                        d("[LGCMB] lookup: A1 slot=" .. tostring(slotIndex)
-                            .. " slotLink=" .. tostring(slotLink and slotLink:sub(1,30) or "nil")
-                            .. " match=" .. tostring(linkMatches))
-                    end
+                    LogTrace("lookup: A1 slot=" .. tostring(slotIndex)
+                        .. " slotLink=" .. tostring(slotLink and slotLink:sub(1,30) or "nil")
+                        .. " match=" .. tostring(linkMatches))
                     -- Trust the scroll list's current selection: GetTargetData() is up-to-date
                     -- when LayoutItem fires (scene updates list selection before calling LayoutItem).
                     -- Same-type listings share itemLink, so link-matching is unreliable;
                     -- slotIndex uniquely identifies a listing and getInfoFn gives its exact data.
                     local ok2, _, _, _, sc, _, _, totalPrice = pcall(getInfoFn, slotIndex)
                     if ok2 and type(totalPrice) == "number" then
-                        if bridge.debug and type(d) == "function" then
-                            d("[LGCMB] lookup: A1 result sc=" .. tostring(sc)
-                                .. " price=" .. tostring(totalPrice)
-                                .. " linkVerified=" .. tostring(linkMatches))
-                        end
+                        LogTrace("lookup: A1 result sc=" .. tostring(sc)
+                            .. " price=" .. tostring(totalPrice)
+                            .. " linkVerified=" .. tostring(linkMatches))
                         return totalPrice, sc
                     end
                     -- getInfoFn failed — fall through to scan.
                 else
-                    if bridge.debug and type(d) == "function" then
+                    if self.debugVerbose then
                         local keys = ""
                         for k, _ in pairs(selectedData) do keys = keys .. tostring(k) .. " " end
-                        d("[LGCMB] lookup: A1 data keys=" .. keys:sub(1, 120))
+                        LogTrace("lookup: A1 data keys=" .. keys:sub(1, 120))
                     end
                 end
             else
-                if bridge.debug and type(d) == "function" then
-                    d("[LGCMB] lookup: GAMEPAD_TH_BROWSE list=" .. tostring(list)
-                        .. " ZO_SL_fn=" .. tostring(type(ZO_ScrollList_GetSelectedData) == "function"))
-                end
+                LogTrace("lookup: GAMEPAD_TH_BROWSE list=" .. tostring(list)
+                    .. " ZO_SL_fn=" .. tostring(type(ZO_ScrollList_GetSelectedData) == "function"))
             end
         else
-            if bridge.debug and type(d) == "function" then
-                d("[LGCMB] lookup: GAMEPAD_TH_BROWSE no list (itemList=" .. tostring(scene.itemList)
-                    .. " list=" .. tostring(scene.list)
-                    .. " parametricList=" .. tostring(scene.parametricList) .. ")")
-            end
+            LogTrace("lookup: GAMEPAD_TH_BROWSE no list (itemList=" .. tostring(scene.itemList)
+                .. " list=" .. tostring(scene.list)
+                .. " parametricList=" .. tostring(scene.parametricList) .. ")")
         end
     end
 
@@ -2337,10 +2322,8 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
                         local ePrice = ed.purchasePrice
                         if type(eLink) == "string" and eLink == itemLink
                            and type(eSc) == "number" and type(ePrice) == "number" then
-                            if bridge.debug and type(d) == "function" then
-                                d("[LGCMB] lookup: A2 scrollData match sc=" .. tostring(eSc)
-                                    .. " price=" .. tostring(ePrice))
-                            end
+                            LogTrace("lookup: A2 scrollData match sc=" .. tostring(eSc)
+                                .. " price=" .. tostring(ePrice))
                             return ePrice, eSc
                         end
                     end
@@ -2352,9 +2335,7 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
     -- APPROACH 3: Scan results via getInfoFn iteration (requires getLinkFn to match correctly).
     -- Without getLinkFn this can only return the first result, so skip if no link function.
     if not getLinkFn then
-        if bridge.debug and type(d) == "function" then
-            d("[LGCMB] lookup: no linkFn, skipping scan (would return wrong item)")
-        end
+        LogTrace("lookup: no linkFn, skipping scan (would return wrong item)")
         return nil, nil
     end
 
@@ -2368,21 +2349,21 @@ function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName
             and (not stackCount or not (type(stackCount) == "number") or sc == stackCount)
         if passFilters then
             local okLink, link2 = pcall(getLinkFn, i)
-            if bridge.debug and type(d) == "function" and i <= 3 then
-                d("[LGCMB] lookup[" .. i .. "]: link2=" .. tostring(link2):sub(1,40)
+            if self.debugVerbose and i <= 3 then
+                LogTrace("lookup[" .. i .. "]: link2=" .. tostring(link2):sub(1,40)
                     .. " match=" .. tostring(okLink and link2 == itemLink))
             end
-                if okLink and link2 == itemLink then
-                    return totalPrice, sc   -- exact match
-                end
-                if targetId and fallbackPrice == nil and itemIdFromLink(link2) == targetId then
-                    fallbackPrice, fallbackStack = totalPrice, sc
-                end
+            if okLink and link2 == itemLink then
+                return totalPrice, sc   -- exact match
+            end
+            if targetId and fallbackPrice == nil and itemIdFromLink(link2) == targetId then
+                fallbackPrice, fallbackStack = totalPrice, sc
+            end
         end
     end
 
-    if bridge.debug and type(d) == "function" and fallbackPrice == nil then
-        d("[LGCMB] lookup: A3 scan done, no match")
+    if fallbackPrice == nil then
+        LogTrace("lookup: A3 scan done, no match")
     end
 
     return fallbackPrice, fallbackStack
@@ -2457,9 +2438,7 @@ function bridge:_hookTooltipPrice()
                         return
                     end
                     local link = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
-                    if bridge.debug and type(d) == "function" then
-                        d("[LGCMB] LayoutFurnishingCraftingResult: link=" .. tostring(link):sub(1, 50))
-                    end
+                    LogTrace("LayoutFurnishingCraftingResult: link=" .. tostring(link):sub(1, 50))
                     if type(link) == "string" and link:find("|H") then
                         ctrl._lgcmbLastKey = nil
                         bridge:_appendGamepadTooltipInfoByLink(ctrl, link, nil, nil, "furncraft")
@@ -2532,9 +2511,7 @@ function bridge:_hookCraftingTooltips()
         if not bridge.enabled then return end
         if type(link) ~= "string" or not link:find("|H") then return end
         if not bridge:_shouldShowTemplateCraftingOverlay() then return end
-        if bridge.debug and type(d) == "function" then
-            d("[LGCMB] craft.append: " .. tostring(link):sub(1, 50))
-        end
+        LogTrace("craft.append: " .. tostring(link):sub(1, 50))
         -- Try tooltip types in order: LEFT is the typical crafting preview tooltip
         local types = {GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP}
         for _, tType in ipairs(types) do
@@ -2562,9 +2539,7 @@ function bridge:_hookCraftingTooltips()
             function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
                 local ok, link = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
                 bridge._pendingCraftingLink = (ok and type(link) == "string" and link:find("|H")) and link or nil
-                if bridge.debug and type(d) == "function" then
-                    d("[LGCMB] craft.SetupResult(KB) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
-                end
+                LogTrace("craft.SetupResult(KB) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
             end)
         SecurePostHook(ZO_SmithingCreation, "SetupResultTooltip",
             function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
@@ -2591,9 +2566,7 @@ function bridge:_hookCraftingTooltips()
                     bridge._pendingCraftingLink = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
                 end
                 bridge._templateCraftingOverlayActive = IsValidItemLink(bridge._pendingCraftingLink)
-                if bridge.debug and type(d) == "function" then
-                    d("[LGCMB] craft.SetupResult(GP) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
-                end
+                LogTrace("craft.SetupResult(GP) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
             end)
         SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip",
             function(selfArg, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
@@ -2605,17 +2578,13 @@ function bridge:_hookCraftingTooltips()
                 end
                 bridge._templateCraftingOverlayActive = IsValidItemLink(link)
                 if type(link) ~= "string" or not link:find("|H") then
-                    if bridge.debug and type(d) == "function" then
-                        d("[LGCMB] craft.SetupResult(GP) post: no link")
-                    end
+                    LogTrace("craft.SetupResult(GP) post: no link")
                     return
                 end
                 -- Also try the dedicated resultTooltip panel used by gamepad smithing.
                 local tip = selfArg and selfArg.resultTooltip and selfArg.resultTooltip.tip
-                if bridge.debug and type(d) == "function" then
-                    d("[LGCMB] craft.SetupResult(GP) post: link=" .. tostring(link):sub(1,40)
-                        .. " tip=" .. tostring(tip ~= nil and type(tip.AddLine) == "function"))
-                end
+                LogTrace("craft.SetupResult(GP) post: link=" .. tostring(link):sub(1,40)
+                    .. " tip=" .. tostring(tip ~= nil and type(tip.AddLine) == "function"))
                 if tip then
                     bridge:_appendGamepadTooltipInfoByLink(tip, link, nil, nil, "furncraft")
                 end
@@ -2662,7 +2631,7 @@ function bridge:_hookCraftingTooltips()
                 return
             end
 
-                if not isFurnishingTemplate then
+            if not isFurnishingTemplate then
                 bridge:_hideOverlay()
                 return
             end
@@ -2782,9 +2751,7 @@ function bridge:_hookTradingHouseTooltip()
 
         if type(itemLink) ~= "string" or not itemLink:find("|H") then
             bridge:_hideOverlay()
-            if bridge.debug then
-                LogDebug("TH LayoutGuildStoreSearchResult: no valid itemLink")
-            end
+            LogDebug("TH LayoutGuildStoreSearchResult: no valid itemLink")
             return
         end
 
@@ -2805,10 +2772,8 @@ function bridge:_hookTradingHouseTooltip()
 
         bridge:_appendGamepadTooltipInfoByLink(ctrl, itemLink, effectiveStackCount, listingPrice, "guildstore")
 
-        if bridge.debug then
-            LogDebug(string.format("TH layout: sc=%s price=%s seller=%s link=%s",
-                tostring(effectiveStackCount), tostring(listingPrice), tostring(sellerName), tostring(itemLink):sub(1, 30)))
-        end
+        LogDebug(string.format("TH layout: sc=%s price=%s seller=%s link=%s",
+            tostring(effectiveStackCount), tostring(listingPrice), tostring(sellerName), tostring(itemLink):sub(1, 30)))
     end)
 
     tooltip._lgcmbTradingHouseLayoutHooked = true
@@ -2865,6 +2830,26 @@ function bridge:_initializeSlashCommands()
             return
         end
 
+        if cmd == "on" then
+            self:SetEnabled(true)
+            return
+        end
+        if cmd == "off" then
+            self:SetEnabled(false)
+            return
+        end
+        if cmd == "debug on" then
+            self:SetDebugEnabled(true)
+            return
+        end
+        if cmd == "debug off" then
+            self:SetDebugEnabled(false)
+            return
+        end
+        if cmd == "verbose on" then
+            self:SetDebugVerbose(true)
+            return
+        end
         if cmd == "verbose off" then
             self:SetDebugVerbose(false)
             return
@@ -2904,7 +2889,7 @@ function bridge:_initializeSettingsPanel()
         type = "panel",
         name = MAJOR,
         displayName = MAJOR,
-        author = "pc243, Codex",
+        author = "Azmail",
         version = ADDON_VERSION,
         registerForRefresh = true,
         registerForDefaults = true,
@@ -3380,25 +3365,25 @@ function bridge:_ensureSubmenuDialog()
                     end
                     local submenuCallback = submenuEntry.callback or submenuEntry.func or submenuEntry[2]
                     if submenuLabel ~= "" then
-                    local entryData
-                    if type(ZO_GamepadEntryData) == "table" and type(ZO_GamepadEntryData.New) == "function" then
-                        entryData = ZO_GamepadEntryData:New(submenuLabel)
-                        if type(entryData.SetIconTintOnSelection) == "function" then
-                            entryData:SetIconTintOnSelection(true)
+                        local entryData
+                        if type(ZO_GamepadEntryData) == "table" and type(ZO_GamepadEntryData.New) == "function" then
+                            entryData = ZO_GamepadEntryData:New(submenuLabel)
+                            if type(entryData.SetIconTintOnSelection) == "function" then
+                                entryData:SetIconTintOnSelection(true)
+                            end
+                        else
+                            entryData = { text = submenuLabel }
                         end
-                    else
-                        entryData = { text = submenuLabel }
-                    end
 
-                    if type(ZO_SharedGamepadEntry_OnSetup) == "function" then
-                        entryData.setup = ZO_SharedGamepadEntry_OnSetup
-                    end
+                        if type(ZO_SharedGamepadEntry_OnSetup) == "function" then
+                            entryData.setup = ZO_SharedGamepadEntry_OnSetup
+                        end
 
-                    entryData._lgcmbCallback = type(submenuCallback) == "function" and submenuCallback or nil
-                    table.insert(parametricList, {
-                        template = "ZO_GamepadItemEntryTemplate",
-                        entryData = entryData,
-                    })
+                        entryData._lgcmbCallback = type(submenuCallback) == "function" and submenuCallback or nil
+                        table.insert(parametricList, {
+                            template = "ZO_GamepadItemEntryTemplate",
+                            entryData = entryData,
+                        })
                     end
                 end
             end
@@ -3460,7 +3445,6 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
     end
 
     local knownNames = CollectExistingActionNames(slotActions)
-    local hasSubmenuDialog = false
     local addedCount = 0
 
     local function AddUniqueAction(label, callback)
@@ -3488,21 +3472,15 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
             if entry.kind == "submenu" then
                 local submenuEntries = entry.entries
                 if type(submenuEntries) == "table" and #submenuEntries > 0 then
-                    if hasSubmenuDialog then
-                        AddUniqueAction(entry.label, function()
-                            bridge:_showSubmenuDialog(entry.label, submenuEntries, entry.callback)
-                        end)
-                    else
-                        for subIndex = 1, #submenuEntries do
-                            local submenuEntry = submenuEntries[subIndex]
-                            if
-                                type(submenuEntry) == "table"
-                                and type(submenuEntry.label) == "string"
-                                and submenuEntry.label ~= ""
-                                and type(submenuEntry.callback) == "function"
-                            then
-                                AddUniqueAction(string.format("%s: %s", entry.label, submenuEntry.label), submenuEntry.callback)
-                            end
+                    for subIndex = 1, #submenuEntries do
+                        local submenuEntry = submenuEntries[subIndex]
+                        if
+                            type(submenuEntry) == "table"
+                            and type(submenuEntry.label) == "string"
+                            and submenuEntry.label ~= ""
+                            and type(submenuEntry.callback) == "function"
+                        then
+                            AddUniqueAction(string.format("%s: %s", entry.label, submenuEntry.label), submenuEntry.callback)
                         end
                     end
                 end
@@ -3659,8 +3637,6 @@ function bridge:Initialize()
     -- Тултип торгового дома (gamepad-режим)
     self:_hookTradingHouseTooltip()
 
-    -- Дополнительная попытка в EVENT_PLAYER_ACTIVATED
-    self:_scheduleTooltipPriceHookRetry()
     self:_registerPlayerActivatedHook()
 
     self._initialized = true
@@ -3669,7 +3645,7 @@ function bridge:Initialize()
         tostring(self._tooltipPriceHooked),
         tostring(self._craftingTooltipsHooked == true),
         tostring(self._tradingHouseTooltipHooked),
-        tostring(true),
+        tostring(self._overlayWindow ~= nil),
         tostring(self.enabled)
     ))
     LogDebug("Initialized")
@@ -3706,9 +3682,7 @@ function bridge:_registerPlayerActivatedHook()
     local TH_OPEN_NS = MAJOR .. "_THOpen"
     EVENT_MANAGER:RegisterForEvent(TH_OPEN_NS, EVENT_OPEN_TRADING_HOUSE, function()
         bridge:_hookTradingHouseTooltip()
-        if bridge.debug and type(d) == "function" then
-            d("[LGCMB] EVENT_OPEN_TRADING_HOUSE: retried TH tooltip hook")
-        end
+        LogTrace("EVENT_OPEN_TRADING_HOUSE: retried TH tooltip hook")
     end)
 
     local TH_CLOSE_NS = MAJOR .. "_THClose"
@@ -3726,10 +3700,8 @@ function bridge:_registerPlayerActivatedHook()
             bridge._templateCraftingOverlayActive = false
             bridge:_hookTooltipPrice()
             bridge:_hookCraftingTooltips()
-            if bridge.debug and type(d) == "function" then
-                d(string.format("[LGCMB] EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
-                    tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
-            end
+            LogTrace(string.format("EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
+                tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
         end)
     end
 
