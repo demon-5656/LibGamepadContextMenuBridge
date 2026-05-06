@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.4.5
+- Fixed crafting-station tooltip info (TTC price, bound status) never appearing in gamepad mode.
+  `_hookCraftingTooltips()` was defined but never called from `Initialize()` — now it is.
+- Added `ZO_GamepadSmithingCreation.SetupResultTooltip` hook for gamepad smithing / clothier /
+  woodworking stations.  The gamepad class overrides this method and uses its own `resultTooltip.tip`
+  floating control instead of the shared `GAMEPAD_TOOLTIPS` pool, so a dedicated hook is required.
+- Added `_hookTradingHouseTooltip()`: post-hooks `GAMEPAD_TOOLTIPS:LayoutGuildStoreSearchResult`
+  so that TTC price / vendor / bound info is appended to the right-panel tooltip whenever an item
+  is selected in the gamepad Trading House browse results.
+- Both new hooks are also retried on `EVENT_PLAYER_ACTIVATED` in case globals are not yet
+  available during the initial `EVENT_ADD_ON_LOADED` pass.
+
+## 1.4.4
+- Fixed tooltip info (TTC price, bound status) not appearing during crafting in gamepad mode.
+  Crafting station tooltips use `LayoutItemLink` instead of `LayoutBagItem`; the bridge now hooks both.
+  Added `_appendGamepadTooltipInfoByLink` helper for item-link–based tooltip augmentation.
+
 ## 1.4.3
 - Optimized the gamepad tooltip hot path by caching TTC tooltip lines and preformatted colored text.
 - Reduced repeated string work and removed unnecessary verbose processing from the frequent tooltip render path.

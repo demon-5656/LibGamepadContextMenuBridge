@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 143
-local ADDON_VERSION = "1.4.3"
+local MINOR = 145
+local ADDON_VERSION = "1.4.5"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -25,6 +25,7 @@ bridge._submenuDialogName = bridge._submenuDialogName or (MAJOR .. "_SubmenuDial
 bridge._settingsPanelRegistered = bridge._settingsPanelRegistered or false
 bridge._slashCommandsRegistered = bridge._slashCommandsRegistered or false
 bridge._tooltipPriceHooked = bridge._tooltipPriceHooked or false
+bridge._tradingHouseTooltipHooked = bridge._tradingHouseTooltipHooked or false
 bridge._playerActivatedHookRegistered = bridge._playerActivatedHookRegistered or false
 bridge._debugLog = bridge._debugLog or {}
 bridge._stringIdByLabel = bridge._stringIdByLabel or {}
@@ -33,6 +34,9 @@ bridge._tooltipTtcCache = bridge._tooltipTtcCache or {}
 bridge._formattedTooltipLineCache = bridge._formattedTooltipLineCache or {}
 bridge._tooltipTtcCacheSize = bridge._tooltipTtcCacheSize or 0
 bridge._formattedTooltipLineCacheSize = bridge._formattedTooltipLineCacheSize or 0
+bridge._overlayWindow = bridge._overlayWindow or nil
+bridge._craftingStationActive = bridge._craftingStationActive or false
+bridge._templateCraftingOverlayActive = bridge._templateCraftingOverlayActive or false
 
 local SAVED_VARS_NAME = MAJOR .. "_SavedVars"
 local SAVED_VARS_VERSION = 1
@@ -43,11 +47,11 @@ local DEFAULTS = {
     debugToChat = true,
     debugStoreHistory = true,
     maxDebugMessages = 200,
-    showTtcPriceInTooltip = false,
+    debugLog = {},
+    showTtcPriceInTooltip = true,
     showTtcPriceDetailsInTooltip = false,
     showJunkStatusInTooltip = true,
     showVendorPriceInTooltip = true,
-    showBoundStatusInTooltip = true,
 }
 
 local unpackArgs = unpack or table.unpack
@@ -74,7 +78,22 @@ function bridge:_addDebugHistory(message)
         return
     end
 
-    self._debugLog[#self._debugLog + 1] = string.format("%s %s", GetDebugTimestamp(), message)
+    local entry = string.format("%s %s", GetDebugTimestamp(), message)
+    self._debugLog[#self._debugLog + 1] = entry
+
+    -- Also persist to SavedVars so the log survives /reloadui and is written to disk.
+    if self.savedVars then
+        if type(self.savedVars.debugLog) ~= "table" then
+            self.savedVars.debugLog = {}
+        end
+        local sv = self.savedVars.debugLog
+        sv[#sv + 1] = entry
+        -- Keep SavedVars log bounded (max 500 lines to avoid giant file).
+        local svLimit = 500
+        while #sv > svLimit do
+            table.remove(sv, 1)
+        end
+    end
 
     local limit = DEFAULTS.maxDebugMessages
     if self.savedVars and tonumber(self.savedVars.maxDebugMessages) then
@@ -182,6 +201,182 @@ local function SafeGetTargetData(entryList)
     ok, data = pcall(entryList.GetTargetData)
     if ok then
         return data
+    end
+
+    return nil
+end
+
+local function SafeGetTargetControl(entryList)
+    if not entryList then
+        return nil
+    end
+
+    if type(entryList.GetTargetControl) == "function" then
+        local ok, control = pcall(entryList.GetTargetControl, entryList)
+        if ok and control then
+            return control
+        end
+
+        ok, control = pcall(entryList.GetTargetControl)
+        if ok and control then
+            return control
+        end
+    end
+
+    if type(entryList.GetSelectedControl) == "function" then
+        local ok, control = pcall(entryList.GetSelectedControl, entryList)
+        if ok and control then
+            return control
+        end
+
+        ok, control = pcall(entryList.GetSelectedControl)
+        if ok and control then
+            return control
+        end
+    end
+
+    return nil
+end
+
+local function IsValidItemLink(link)
+    return type(link) == "string" and link:find("|H") ~= nil
+end
+
+function bridge:_extractItemLinkFromData(data)
+    if type(data) ~= "table" then
+        return nil
+    end
+
+    local directKeys = {
+        "itemLink",
+        "resultItemLink",
+        "previewItemLink",
+        "recipeResultItemLink",
+        "furnishingItemLink",
+        "craftedItemLink",
+        "link",
+    }
+
+    for i = 1, #directKeys do
+        local value = data[directKeys[i]]
+        if IsValidItemLink(value) then
+            return value
+        end
+    end
+
+    local nestedKeys = {
+        "itemData",
+        "resultData",
+        "recipeData",
+        "selectedData",
+        "entryData",
+        "data",
+        "recipe",
+    }
+
+    for i = 1, #nestedKeys do
+        local nested = data[nestedKeys[i]]
+        if type(nested) == "table" then
+            local nestedLink = self:_extractItemLinkFromData(nested)
+            if IsValidItemLink(nestedLink) then
+                return nestedLink
+            end
+        end
+    end
+
+    if type(GetRecipeResultItemLink) == "function" then
+        local recipeListIndex = data.recipeListIndex or data.selectedRecipeListIndex or data.listIndex
+        local recipeIndex = data.recipeIndex or data.selectedRecipeIndex or data.index
+        if recipeListIndex ~= nil and recipeIndex ~= nil then
+            local ok, recipeLink = pcall(GetRecipeResultItemLink, recipeListIndex, recipeIndex)
+            if ok and IsValidItemLink(recipeLink) then
+                return recipeLink
+            end
+        end
+    end
+
+    if type(GetSmithingPatternResultLink) == "function" then
+        local patternIndex = data.patternIndex
+        local materialIndex = data.materialIndex
+        local materialQuantity = data.materialQuantity
+        local styleIndex = data.styleIndex
+        local traitIndex = data.traitIndex
+        if patternIndex ~= nil and materialIndex ~= nil then
+            local ok, patternLink = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+            if ok and IsValidItemLink(patternLink) then
+                return patternLink
+            end
+        end
+    end
+
+    return nil
+end
+
+function bridge:_resolveCurrentFurnishingLink(sourceObject)
+    if IsValidItemLink(self._pendingCraftingLink) then
+        return self._pendingCraftingLink
+    end
+
+    local methodNames = {
+        "GetCurrentResultItemLink",
+        "GetResultItemLink",
+        "GetCurrentResultLink",
+        "GetCurrentFurnishingResultItemLink",
+        "GetFurnishingResultItemLink",
+        "GetCurrentFurnishingLink",
+        "GetSelectedRecipeResultItemLink",
+        "GetSelectedFurnishingRecipeResultItemLink",
+    }
+
+    local methodTargets = {
+        sourceObject,
+        sourceObject and sourceObject.resultTooltip,
+        ZO_GamepadSmithingCreation,
+        ZO_SmithingCreation,
+        SMITHING,
+        GAMEPAD_SMITHING_CREATION,
+    }
+
+    for targetIndex = 1, #methodTargets do
+        local target = methodTargets[targetIndex]
+        if type(target) == "table" then
+            for methodIndex = 1, #methodNames do
+                local methodName = methodNames[methodIndex]
+                local method = target[methodName]
+                if type(method) == "function" then
+                    local ok, link = pcall(method, target)
+                    if ok and IsValidItemLink(link) then
+                        return link
+                    end
+
+                    ok, link = pcall(method)
+                    if ok and IsValidItemLink(link) then
+                        return link
+                    end
+                end
+            end
+        end
+    end
+
+    local listTargets = {
+        sourceObject and sourceObject.itemList,
+        sourceObject and sourceObject.list,
+        sourceObject and sourceObject.parametricList,
+        sourceObject and sourceObject.recipeList,
+        sourceObject and sourceObject.patternList,
+        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.itemList,
+        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.list,
+        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.parametricList,
+        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.recipeList,
+        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.patternList,
+    }
+
+    for i = 1, #listTargets do
+        local selectedData = SafeGetTargetData(listTargets[i])
+        local link = self:_extractItemLinkFromData(selectedData)
+        if IsValidItemLink(link) then
+            return link
+        end
     end
 
     return nil
@@ -589,8 +784,7 @@ function bridge:_rememberContextCallback(func, category, args)
         args = args,
     }
 
-    self._callbackCountLast = (self._callbackCountLast or 0) + 1
-    LogTrace(string.format("Registered callback in category %s (total=%d)", tostring(category), self._callbackCountLast))
+    LogTrace(string.format("Registered callback in category %s (count=%d)", tostring(category), #callbacks))
 end
 
 function bridge:_importExistingCallbacks(lcm)
@@ -671,6 +865,9 @@ function bridge:SetEnabled(enabled)
     if self.savedVars then
         self.savedVars.enabled = self.enabled
     end
+    if not self.enabled then
+        self:_hideOverlay()
+    end
     LogDebug("Bridge enabled: " .. tostring(self.enabled))
 end
 
@@ -718,15 +915,11 @@ function bridge:SetShowVendorPriceInTooltip(enabled)
     end
 end
 
-function bridge:SetShowBoundStatusInTooltip(enabled)
-    local value = not not enabled
-    if self.savedVars then
-        self.savedVars.showBoundStatusInTooltip = value
-    end
-end
-
 function bridge:ClearDebugLog()
     self._debugLog = {}
+    if self.savedVars then
+        self.savedVars.debugLog = {}
+    end
     self:_debugMessage("Debug log cleared", false)
 end
 
@@ -753,6 +946,56 @@ function bridge:DumpDebugLog(limit)
     end
 end
 
+function bridge:DumpRuntimeStatus()
+    if type(d) ~= "function" then
+        return
+    end
+
+    local summary, total = self:_summarizeContextRegistry()
+    local overlayVisible = false
+    if self._overlayWindow and self._overlayWindow.window and type(self._overlayWindow.window.IsHidden) == "function" then
+        overlayVisible = not self._overlayWindow.window:IsHidden()
+    end
+
+    d(string.format(
+        "[%s] enabled=%s debug=%s verbose=%s overlay=%s initialized=%s",
+        MAJOR,
+        tostring(self.enabled),
+        tostring(self.debug),
+        tostring(self.debugVerbose),
+        tostring(true),
+        tostring(self._initialized)
+    ))
+    d(string.format(
+        "[%s] hooks tooltip=%s crafting=%s tradingHouse=%s discover=%s refresh=%s playerActivated=%s",
+        MAJOR,
+        tostring(self._tooltipPriceHooked),
+        tostring(self._craftingTooltipsHooked == true),
+        tostring(self._tradingHouseTooltipHooked),
+        tostring(self._discoverHooked),
+        tostring(self._refreshHooked),
+        tostring(self._playerActivatedHookRegistered)
+    ))
+    d(string.format(
+        "[%s] overlay created=%s visible=%s cachedLines=%d formattedCache=%d",
+        MAJOR,
+        tostring(self._overlayWindow ~= nil),
+        tostring(overlayVisible),
+        tonumber(self._tooltipTtcCacheSize or 0),
+        tonumber(self._formattedTooltipLineCacheSize or 0)
+    ))
+    d(string.format(
+        "[%s] settings TTC=%s TTCdetails=%s junk=%s vendor=%s registry=%d (%s)",
+        MAJOR,
+        tostring(self:_shouldShowTtcTooltipPrice()),
+        tostring(self:_shouldShowTtcTooltipDetails()),
+        tostring(self:_shouldShowJunkStatusInTooltip()),
+        tostring(self:_shouldShowVendorPriceInTooltip()),
+        tonumber(total or 0),
+        tostring(summary)
+    ))
+end
+
 function bridge:_initializeSavedVars()
     if self.savedVars then
         return
@@ -769,11 +1012,19 @@ function bridge:_initializeSavedVars()
     self.enabled = self.savedVars.enabled ~= false
     self.debug = self.savedVars.debug == true
     self.debugVerbose = self.savedVars.debugVerbose == true
+    -- Restore in-memory log from persisted SavedVars log.
+    if type(self.savedVars.debugLog) == "table" then
+        for _, v in ipairs(self.savedVars.debugLog) do
+            self._debugLog[#self._debugLog + 1] = v
+        end
+    else
+        self.savedVars.debugLog = {}
+    end
     LogTrace("SavedVars loaded")
 end
 
 function bridge:_shouldShowTtcTooltipPrice()
-    return self.savedVars and self.savedVars.showTtcPriceInTooltip == true
+    return not not (not self.savedVars or self.savedVars.showTtcPriceInTooltip ~= false)
 end
 
 function bridge:_shouldShowTtcTooltipDetails()
@@ -788,8 +1039,12 @@ function bridge:_shouldShowVendorPriceInTooltip()
     return not not (self.savedVars and self.savedVars.showVendorPriceInTooltip ~= false)
 end
 
-function bridge:_shouldShowBoundStatusInTooltip()
-    return not not (self.savedVars and self.savedVars.showBoundStatusInTooltip ~= false)
+function bridge:_shouldShowTemplateCraftingOverlay()
+    return self._templateCraftingOverlayActive == true
+end
+
+function bridge:_shouldUseOverlayBackdrop(source)
+    return source == "furncraft" and self:_shouldShowTemplateCraftingOverlay()
 end
 
 function bridge:_getTtcPriceInfo(itemLink)
@@ -1026,13 +1281,10 @@ function bridge:_getJunkStatusText(bagId, slotIndex)
     return nil
 end
 
-function bridge:_getBoundStatusText(bagId, slotIndex, itemLink)
-    if not self:_shouldShowBoundStatusInTooltip() then
-        return nil
-    end
-
+function bridge:_isBoundItem(bagId, slotIndex, itemLink)
     local isBound = false
-    if type(IsItemBound) == "function" then
+
+    if bagId ~= nil and slotIndex ~= nil and type(IsItemBound) == "function" then
         local ok, value = pcall(IsItemBound, bagId, slotIndex)
         if ok and value == true then
             isBound = true
@@ -1046,18 +1298,27 @@ function bridge:_getBoundStatusText(bagId, slotIndex, itemLink)
         end
     end
 
-    return isBound and "Bound: Yes" or nil
+    return isBound
 end
 
 function bridge:_buildTooltipInfoLines(bagId, slotIndex)
     local lines = {}
     local itemLink = self:_getItemLinkFromBagAndSlot(bagId, slotIndex)
+    if self:_isBoundItem(bagId, slotIndex, itemLink) then
+        return lines
+    end
+
+    local stackCount = nil
+    if type(GetSlotStackSize) == "function" then
+        local ok, value = pcall(GetSlotStackSize, bagId, slotIndex)
+        if ok and type(value) == "number" and value > 0 then
+            stackCount = value
+        end
+    end
     if itemLink then
-        local ttcLines = self:_getCachedTtcTooltipLines(itemLink)
-        if type(ttcLines) == "table" then
-            for i = 1, #ttcLines do
-                lines[#lines + 1] = ttcLines[i]
-            end
+        local linkLines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false)
+        for i = 1, #linkLines do
+            lines[#lines + 1] = linkLines[i]
         end
     end
 
@@ -1066,14 +1327,81 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
         lines[#lines + 1] = junkStatus
     end
 
-    local boundStatus = self:_getBoundStatusText(bagId, slotIndex, itemLink)
     local vendorPrice = self:_getVendorPriceText(bagId, slotIndex)
     if vendorPrice then
         lines[#lines + 1] = vendorPrice
     end
 
-    if boundStatus then
-        lines[#lines + 1] = boundStatus
+    return lines
+end
+
+function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice, includeVendor)
+    local lines = {}
+    if type(itemLink) ~= "string" or itemLink == "" then
+        return lines
+    end
+
+    if self:_isBoundItem(nil, nil, itemLink) then
+        return lines
+    end
+
+    if includeVendor == nil then
+        includeVendor = true
+    end
+
+    if self:_shouldShowTtcTooltipPrice() then
+        local ttcLines = self:_getCachedTtcTooltipLines(itemLink)
+        if type(ttcLines) == "table" then
+            for i = 1, #ttcLines do
+                lines[#lines + 1] = ttcLines[i]
+            end
+        end
+
+        if type(stackCount) == "number" and stackCount > 1 then
+            local priceInfo = self:_getTtcPriceInfo(itemLink)
+            if priceInfo then
+                local unitPrice = priceInfo.SuggestedPrice or priceInfo.Avg
+                if type(unitPrice) == "number" and unitPrice > 0 then
+                    local stackTotal = unitPrice * stackCount
+                    local stackText = self:_formatTooltipInfoCurrency(stackTotal)
+                    if type(stackText) == "string" and stackText ~= "" then
+                        lines[#lines + 1] = "TTC x" .. stackCount .. ": " .. stackText
+                    end
+                end
+            end
+        end
+
+        if type(listingPrice) == "number" and listingPrice > 0
+            and type(stackCount) == "number" and stackCount > 0
+        then
+            local priceInfo = self:_getTtcPriceInfo(itemLink)
+            local unitPrice = priceInfo and (priceInfo.SuggestedPrice or priceInfo.Avg)
+            if type(unitPrice) == "number" and unitPrice > 0 then
+                local listingPerUnit = listingPrice / stackCount
+                local diff = listingPerUnit - unitPrice
+                local absDiff = math.abs(diff)
+                local diffText = self:_formatCompactTooltipCurrency(absDiff)
+                if type(diffText) == "string" and diffText ~= "" then
+                    if diff > 0.5 then
+                        lines[#lines + 1] = "vs TTC: +" .. diffText .. " дороже"
+                    elseif diff < -0.5 then
+                        lines[#lines + 1] = "vs TTC: -" .. diffText .. " дешевле"
+                    else
+                        lines[#lines + 1] = "vs TTC: по рынку"
+                    end
+                end
+            end
+        end
+    end
+
+    if includeVendor and self:_shouldShowVendorPriceInTooltip() and type(GetItemLinkValue) == "function" then
+        local ok, sellPrice = pcall(GetItemLinkValue, itemLink)
+        if ok and type(sellPrice) == "number" and sellPrice > 0 then
+            local priceText = self:_formatTooltipInfoCurrency(sellPrice)
+            if type(priceText) == "string" and priceText ~= "" then
+                lines[#lines + 1] = "Vendor: " .. priceText
+            end
+        end
     end
 
     return lines
@@ -1104,6 +1432,18 @@ local function FormatTooltipLine(text)
         end
     elseif text:match("^Min/Avg/Max:%s") then
         formatted = "|c9F9780" .. text .. "|r"
+    elseif text:match("^TTC x%d") then
+        -- TTC stack total — same gold colour as TTC line
+        formatted = "|cD8C06A" .. text .. "|r"
+    elseif text:match("^vs TTC:") then
+        -- дешевле = зелёный, дороже = красный, по рынку = серый
+        if text:find("дешевле") then
+            formatted = "|c6AB87A" .. text .. "|r"
+        elseif text:find("дороже") then
+            formatted = "|cD46A6A" .. text .. "|r"
+        else
+            formatted = "|cA0A070" .. text .. "|r"
+        end
     elseif text:match("^Bound:%s") then
         formatted = "|cA7A7A7" .. text .. "|r"
     else
@@ -1122,53 +1462,930 @@ local function FormatTooltipLine(text)
     return formatted
 end
 
-function bridge:_getTooltipInfoStyle(text)
-    if type(ZO_TOOLTIP_STYLES) ~= "table" then
-        return nil
+function bridge:_ensureOverlayWindow()
+    if self._overlayWindow then
+        LogTrace("Overlay reuse existing window")
+        return self._overlayWindow
     end
 
-    return ZO_TOOLTIP_STYLES.tooltipDefault or ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.bodySection
-end
-
-function bridge:_getTooltipCompactStyle()
-    if type(ZO_TOOLTIP_STYLES) ~= "table" then
-        return nil
-    end
-
-    return ZO_TOOLTIP_STYLES.tooltipDefault or ZO_TOOLTIP_STYLES.bodyDescription or ZO_TOOLTIP_STYLES.bodySection
-end
-
-function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex)
-    if tooltip == nil then
-        return
-    end
-    
-    if type(tooltip.AddLine) ~= "function" then
-        return
-    end
-    
-    local lines = self:_buildTooltipInfoLines(bagId, slotIndex)
-    
-    if #lines == 0 then
-        return
-    end
-
-    for i = 1, #lines do
-        local style = i == 1 and self:_getTooltipCompactStyle() or self:_getTooltipInfoStyle(lines[i])
-        local formattedLine = FormatTooltipLine(lines[i])
-        if style ~= nil then
-            tooltip:AddLine(formattedLine, style)
-        else
-            tooltip:AddLine(formattedLine)
+    local wm = WINDOW_MANAGER
+    if wm == nil and type(GetWindowManager) == "function" then
+        local ok, resolved = pcall(GetWindowManager)
+        if ok then
+            wm = resolved
         end
     end
 
-    local spacerStyle = self:_getTooltipCompactStyle()
-    if spacerStyle ~= nil then
-        tooltip:AddLine(" ", spacerStyle)
-    else
-        tooltip:AddLine(" ")
+    if wm == nil then
+        LogDebug("Overlay unavailable: WINDOW_MANAGER missing")
+        return nil
     end
+
+    local guiRoot = _G.GuiRoot
+    if guiRoot == nil then
+        LogDebug("Overlay unavailable: GuiRoot missing")
+        return nil
+    end
+
+    local window = nil
+    local isTopLevelWindow = false
+
+    if type(wm.CreateTopLevelWindow) == "function" then
+        window = wm:CreateTopLevelWindow(MAJOR .. "_Overlay")
+        isTopLevelWindow = true
+        LogTrace("Overlay using CreateTopLevelWindow")
+    elseif type(wm.CreateControl) == "function" and CT_CONTROL ~= nil then
+        window = wm:CreateControl(MAJOR .. "_Overlay", guiRoot, CT_CONTROL)
+        LogTrace("Overlay using CreateControl fallback")
+    else
+        LogDebug("Overlay unavailable: no supported window/control factory")
+        return nil
+    end
+
+    if window == nil then
+        LogDebug("Overlay unavailable: factory returned nil")
+        return nil
+    end
+
+    window:SetHidden(true)
+    window:SetMouseEnabled(false)
+    if type(window.SetDrawLayer) == "function" then
+        window:SetDrawLayer(DL_OVERLAY or "OVERLAY")
+    end
+    if type(window.SetDrawTier) == "function" then
+        window:SetDrawTier(DT_HIGH or DT_MEDIUM or "HIGH")
+    end
+    if type(window.SetDrawLevel) == "function" then
+        window:SetDrawLevel(10)
+    end
+    if type(window.SetMovable) == "function" then
+        window:SetMovable(false)
+    end
+    if type(window.SetClampedToScreen) == "function" then
+        window:SetClampedToScreen(true)
+    end
+    if not isTopLevelWindow and type(window.SetParent) == "function" then
+        window:SetParent(guiRoot)
+    end
+    window:SetDimensions(320, 120)
+    window:ClearAnchors()
+    window:SetAnchor(TOPRIGHT, guiRoot, TOPRIGHT, -40, 140)
+
+    local backdrop = wm:CreateControl(nil, window, CT_BACKDROP)
+    backdrop:SetAnchorFill(window)
+    if type(backdrop.SetCenterColor) == "function" then
+        backdrop:SetCenterColor(0, 0, 0, 0.70)
+    end
+    if type(backdrop.SetEdgeColor) == "function" then
+        backdrop:SetEdgeColor(0, 0, 0, 0)
+    end
+    if type(backdrop.SetEdgeTexture) == "function" then
+        backdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/Gamepad/gp_tooltip_edge_semitrans_64.dds", 64, 8, 8)
+    end
+    if type(backdrop.SetHidden) == "function" then
+        backdrop:SetHidden(true)
+    end
+
+    local accentBackdrop = wm:CreateControl(nil, window, CT_BACKDROP)
+    accentBackdrop:ClearAnchors()
+    accentBackdrop:SetAnchor(TOPLEFT, window, TOPLEFT, 2, 2)
+    accentBackdrop:SetAnchor(BOTTOMRIGHT, window, BOTTOMRIGHT, -2, -2)
+    if type(accentBackdrop.SetCenterColor) == "function" then
+        accentBackdrop:SetCenterColor(0, 0, 0, 0.02)
+    end
+    if type(accentBackdrop.SetEdgeColor) == "function" then
+        accentBackdrop:SetEdgeColor(0, 0, 0, 0)
+    end
+    if type(accentBackdrop.SetEdgeTexture) == "function" then
+        accentBackdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/Gamepad/gp_tooltip_edge_semitrans_64.dds", 64, 8, 8)
+    end
+    if type(accentBackdrop.SetHidden) == "function" then
+        accentBackdrop:SetHidden(true)
+    end
+
+    local borderTop = wm:CreateControl(nil, window, CT_BACKDROP)
+    borderTop:SetAnchor(TOPLEFT, window, TOPLEFT, 2, 2)
+    borderTop:SetAnchor(TOPRIGHT, window, TOPRIGHT, -2, 2)
+    borderTop:SetHeight(2)
+    if type(borderTop.SetDrawLayer) == "function" then
+        borderTop:SetDrawLayer(DL_OVERLAY or "OVERLAY")
+    end
+    if type(borderTop.SetDrawLevel) == "function" then
+        borderTop:SetDrawLevel(20)
+    end
+    if type(borderTop.SetCenterColor) == "function" then
+        borderTop:SetCenterColor(0.72, 0.66, 0.42, 0.98)
+    end
+    if type(borderTop.SetHidden) == "function" then
+        borderTop:SetHidden(true)
+    end
+
+    local borderBottom = wm:CreateControl(nil, window, CT_BACKDROP)
+    borderBottom:SetAnchor(BOTTOMLEFT, window, BOTTOMLEFT, 2, -2)
+    borderBottom:SetAnchor(BOTTOMRIGHT, window, BOTTOMRIGHT, -2, -2)
+    borderBottom:SetHeight(2)
+    if type(borderBottom.SetDrawLayer) == "function" then
+        borderBottom:SetDrawLayer(DL_OVERLAY or "OVERLAY")
+    end
+    if type(borderBottom.SetDrawLevel) == "function" then
+        borderBottom:SetDrawLevel(20)
+    end
+    if type(borderBottom.SetCenterColor) == "function" then
+        borderBottom:SetCenterColor(0.72, 0.66, 0.42, 0.98)
+    end
+    if type(borderBottom.SetHidden) == "function" then
+        borderBottom:SetHidden(true)
+    end
+
+    local borderLeft = wm:CreateControl(nil, window, CT_BACKDROP)
+    borderLeft:SetAnchor(TOPLEFT, window, TOPLEFT, 2, 2)
+    borderLeft:SetAnchor(BOTTOMLEFT, window, BOTTOMLEFT, 2, -2)
+    borderLeft:SetWidth(2)
+    if type(borderLeft.SetDrawLayer) == "function" then
+        borderLeft:SetDrawLayer(DL_OVERLAY or "OVERLAY")
+    end
+    if type(borderLeft.SetDrawLevel) == "function" then
+        borderLeft:SetDrawLevel(20)
+    end
+    if type(borderLeft.SetCenterColor) == "function" then
+        borderLeft:SetCenterColor(0.72, 0.66, 0.42, 0.98)
+    end
+    if type(borderLeft.SetHidden) == "function" then
+        borderLeft:SetHidden(true)
+    end
+
+    local borderRight = wm:CreateControl(nil, window, CT_BACKDROP)
+    borderRight:SetAnchor(TOPRIGHT, window, TOPRIGHT, -2, 2)
+    borderRight:SetAnchor(BOTTOMRIGHT, window, BOTTOMRIGHT, -2, -2)
+    borderRight:SetWidth(2)
+    if type(borderRight.SetDrawLayer) == "function" then
+        borderRight:SetDrawLayer(DL_OVERLAY or "OVERLAY")
+    end
+    if type(borderRight.SetDrawLevel) == "function" then
+        borderRight:SetDrawLevel(20)
+    end
+    if type(borderRight.SetCenterColor) == "function" then
+        borderRight:SetCenterColor(0.72, 0.66, 0.42, 0.98)
+    end
+    if type(borderRight.SetHidden) == "function" then
+        borderRight:SetHidden(true)
+    end
+
+    local label = wm:CreateControl(nil, window, CT_LABEL)
+    label:SetAnchor(TOPLEFT, window, TOPLEFT, 12, 8)
+    label:SetWidth(296)
+    label:SetHeight(92)
+    if type(label.SetVerticalAlignment) == "function" then
+        label:SetVerticalAlignment(TEXT_ALIGN_TOP)
+    end
+    if type(label.SetHorizontalAlignment) == "function" then
+        label:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
+    end
+    if type(label.SetFont) == "function" then
+        label:SetFont("ZoFontGamepad27")
+    end
+    if type(label.SetColor) == "function" then
+        label:SetColor(1, 1, 1, 1)
+    end
+
+    self._overlayWindow = {
+        window = window,
+        backdrop = backdrop,
+        accentBackdrop = accentBackdrop,
+        borderTop = borderTop,
+        borderBottom = borderBottom,
+        borderLeft = borderLeft,
+        borderRight = borderRight,
+        label = label,
+        lineLabels = { label },
+        renderedLineCount = 0,
+    }
+
+    LogDebug("Overlay window created")
+
+    return self._overlayWindow
+end
+
+function bridge:_ensureOverlayLineLabels(overlay, lineCount)
+    if not overlay or not overlay.window or not overlay.label then
+        return nil
+    end
+
+    overlay.lineLabels = overlay.lineLabels or { overlay.label }
+    local lineLabels = overlay.lineLabels
+    local wm = WINDOW_MANAGER
+
+    for index = #lineLabels + 1, lineCount do
+        local lineLabel = wm:CreateControl(nil, overlay.window, CT_LABEL)
+        lineLabel:SetWidth(296)
+        lineLabel:SetHeight(28)
+        if type(lineLabel.SetVerticalAlignment) == "function" then
+            lineLabel:SetVerticalAlignment(TEXT_ALIGN_TOP)
+        end
+        if type(lineLabel.SetHorizontalAlignment) == "function" then
+            lineLabel:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
+        end
+        if type(lineLabel.SetFont) == "function" then
+            lineLabel:SetFont("ZoFontGamepad27")
+        end
+        if type(lineLabel.SetColor) == "function" then
+            lineLabel:SetColor(1, 1, 1, 1)
+        end
+
+        lineLabel:ClearAnchors()
+        lineLabel:SetAnchor(TOPLEFT, lineLabels[index - 1], BOTTOMLEFT, 0, 0)
+        lineLabels[index] = lineLabel
+    end
+
+    return lineLabels
+end
+
+function bridge:_renderOverlayLines(overlay, formattedLines)
+    if not overlay or not overlay.label then
+        return
+    end
+
+    local lineCount = math.max(1, #formattedLines)
+    local lineLabels = self:_ensureOverlayLineLabels(overlay, lineCount)
+    if not lineLabels then
+        return
+    end
+
+    overlay.renderedLineCount = #formattedLines
+    for index = 1, #lineLabels do
+        local lineLabel = lineLabels[index]
+        local text = formattedLines[index]
+        if type(text) == "string" and text ~= "" then
+            lineLabel:SetHeight(28)
+            lineLabel:SetText(text)
+            lineLabel:SetHidden(false)
+        else
+            lineLabel:SetText("")
+            lineLabel:SetHidden(true)
+            lineLabel:SetHeight(0)
+        end
+    end
+end
+
+function bridge:_isRenderableControl(control)
+    return control
+        and (type(control.IsHidden) ~= "function" or control:IsHidden() == false)
+        and (type(control.GetWidth) ~= "function" or control:GetWidth() > 0)
+        and (type(control.GetHeight) ~= "function" or control:GetHeight() > 0)
+end
+
+function bridge:_getOverlayTooltipBySource(source)
+    if type(GAMEPAD_TOOLTIPS) ~= "table" or type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
+        return nil
+    end
+
+    local tooltipTypes = nil
+    if source == "furncraft" then
+        tooltipTypes = { GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP }
+    else
+        tooltipTypes = { GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_LEFT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP }
+    end
+
+    for i = 1, #tooltipTypes do
+        local tooltipType = tooltipTypes[i]
+        if type(tooltipType) == "number" then
+            local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
+            if self:_isRenderableControl(tooltip) then
+                return tooltip
+            end
+        end
+    end
+
+    return nil
+end
+
+function bridge:_getActiveOverlayTooltip()
+    if self:_isRenderableControl(self._overlayTooltipControl) then
+        return self._overlayTooltipControl
+    end
+
+    return self:_getOverlayTooltipBySource(self._overlaySource)
+end
+
+function bridge:_getOverlayAnchorContainer()
+    local tooltip = self:_getActiveOverlayTooltip()
+    if not self:_isRenderableControl(tooltip) then
+        return nil
+    end
+
+    local current = tooltip
+    local best = tooltip
+    local guiRoot = _G.GuiRoot
+
+    for _ = 1, 8 do
+        if type(current.GetParent) ~= "function" then
+            break
+        end
+
+        local ok, parent = pcall(current.GetParent, current)
+        if not ok or not self:_isRenderableControl(parent) or parent == guiRoot then
+            break
+        end
+
+        best = parent
+        current = parent
+    end
+
+    return best
+end
+
+function bridge:_shouldKeepOverlayVisible()
+    local tooltip = self:_getActiveOverlayTooltip()
+    if tooltip then
+        return true
+    end
+
+    return self:_isRenderableControl(self._overlayAnchorControl)
+end
+
+function bridge:_refreshOverlayVisibility()
+    local overlay = self._overlayWindow
+    if not overlay or not overlay.window or overlay.window:IsHidden() then
+        return
+    end
+
+    local now = type(GetGameTimeMilliseconds) == "function" and GetGameTimeMilliseconds() or 0
+    if now - (overlay._lastVisibilityCheckAt or 0) < 100 then
+        return
+    end
+    overlay._lastVisibilityCheckAt = now
+
+    if self:_shouldKeepOverlayVisible() then
+        return
+    end
+
+    if not self:_shouldKeepOverlayVisible() then
+        self:_hideOverlay()
+        LogTrace("Overlay hidden by visibility guard")
+    end
+end
+
+function bridge:_resizeOverlayToText(overlay)
+    if not overlay or not overlay.window or not overlay.label then
+        return
+    end
+
+    local tooltip = self:_getOverlayAnchorContainer() or self:_getActiveOverlayTooltip()
+    local availableWidth = 500
+    local maxHeight = 220
+
+    if tooltip and type(tooltip.GetWidth) == "function" then
+        if self._overlaySource == "furncraft" then
+            availableWidth = math.max(260, math.min(math.floor(tooltip:GetWidth() * 0.60), 336))
+        elseif self._overlaySource == "guildstore" then
+            availableWidth = math.max(360, math.min(tooltip:GetWidth() - 28, 470))
+        else
+            availableWidth = math.max(430, math.min(tooltip:GetWidth() - 12, 560))
+        end
+    end
+    if tooltip and type(tooltip.GetHeight) == "function" then
+        if self._overlaySource == "furncraft" then
+            maxHeight = math.max(180, math.min(math.floor(tooltip:GetHeight() * 0.72), 340))
+        else
+            maxHeight = math.max(120, math.min(math.floor(tooltip:GetHeight() * 0.42), 220))
+        end
+    end
+
+    local labelWidth = availableWidth - 24
+    local lineLabels = overlay.lineLabels or { overlay.label }
+    local renderedLineCount = overlay.renderedLineCount or 0
+    local usedHeight = 8
+
+    for index = 1, #lineLabels do
+        local lineLabel = lineLabels[index]
+        lineLabel:SetWidth(labelWidth)
+        if type(lineLabel.SetDimensionConstraints) == "function" then
+            lineLabel:SetDimensionConstraints(labelWidth, 0, labelWidth, maxHeight - 12)
+        end
+
+        if index <= renderedLineCount then
+            local textHeight = type(lineLabel.GetTextHeight) == "function" and lineLabel:GetTextHeight() or 28
+            local lineHeight = math.max(28, textHeight)
+            lineLabel:SetHeight(lineHeight)
+            usedHeight = usedHeight + lineHeight
+        else
+            lineLabel:SetHeight(0)
+        end
+    end
+
+    local desiredHeight = math.max(96, math.min(usedHeight + 8, maxHeight))
+
+    overlay.window:SetDimensions(availableWidth, desiredHeight)
+end
+
+function bridge:_getOverlayInsetsForSource(source)
+    if source == "guildstore" then
+        return -10, -168
+    end
+    if source == "bag" then
+        return -12, -176
+    end
+    if source == "furncraft" then
+        return 0, -184
+    end
+    return 0, -100
+end
+
+function bridge:_hideOverlay()
+    self._overlayAnchorControl = nil
+    self._overlaySource = nil
+    self._overlayTooltipControl = nil
+
+    local overlay = self._overlayWindow
+    if overlay and overlay.window and type(overlay.window.SetHidden) == "function" then
+        overlay._lastVisibilityCheckAt = 0
+        if type(overlay.window.SetHandler) == "function" then
+            overlay.window:SetHandler("OnUpdate", nil)
+        end
+        overlay.window:SetHidden(true)
+    end
+end
+
+function bridge:_positionOverlay()
+    local overlay = self:_ensureOverlayWindow()
+    if not overlay or not overlay.window then
+        LogDebug("Overlay position skipped: overlay missing")
+        return false
+    end
+
+    local guiRoot = _G.GuiRoot
+    local anchorTarget = guiRoot
+    local point = TOPRIGHT
+    local relativePoint = TOPRIGHT
+    local offsetX = -24
+    local offsetY = 120
+
+    local tooltip = self:_getOverlayAnchorContainer() or self:_getActiveOverlayTooltip()
+    if tooltip then
+        local insetX, insetY = self:_getOverlayInsetsForSource(self._overlaySource)
+        anchorTarget = tooltip
+        if self._overlaySource == "furncraft" then
+            point = TOP
+            relativePoint = TOP
+        else
+            point = TOPLEFT
+            relativePoint = TOPLEFT
+        end
+        offsetX = insetX
+        offsetY = insetY
+        LogTrace("Overlay anchored inside active tooltip")
+    elseif self:_isRenderableControl(self._overlayAnchorControl) then
+        anchorTarget = self._overlayAnchorControl
+        point = BOTTOMLEFT
+        relativePoint = TOPLEFT
+        offsetX = 18
+        offsetY = -8
+        LogTrace("Overlay anchored above selected item row fallback")
+    else
+        LogTrace("Overlay fallback anchor: GuiRoot")
+        return false
+    end
+
+    overlay.window:ClearAnchors()
+    overlay.window:SetAnchor(point, anchorTarget, relativePoint, offsetX, offsetY)
+    return true
+end
+
+local function ParseCompactOverlayInfo(lines)
+    local info = {
+        ttc = nil,
+        minAvgMax = nil,
+        stackTotal = nil,
+        versusTtc = nil,
+        vendor = nil,
+        junk = nil,
+    }
+
+    for i = 1, #lines do
+        local line = lines[i]
+        if type(line) == "string" then
+            local value = line:match("^TTC:%s*(.+)$")
+            if value then
+                info.ttc = value
+            end
+
+            local minValue, avgValue, maxValue = line:match("^Min/Avg/Max:%s*(.-)%s*/%s*(.-)%s*/%s*(.+)$")
+            if minValue and avgValue and maxValue then
+                info.minAvgMax = string.format("%s / %s / %s", minValue, avgValue, maxValue)
+            end
+
+            local stackCount, stackPrice = line:match("^TTC x(%d+):%s*(.+)$")
+            if stackCount and stackPrice then
+                info.stackTotal = string.format("x%s %s", stackCount, stackPrice)
+            end
+
+            local diffValue = line:match("^vs TTC:%s*(.+)$")
+            if diffValue then
+                info.versusTtc = diffValue
+            end
+
+            local vendorValue = line:match("^Vendor:%s*(.+)$")
+            if vendorValue then
+                info.vendor = vendorValue
+            end
+
+            local junkValue = line:match("^Junk:%s*(.+)$")
+            if junkValue then
+                info.junk = junkValue
+            end
+        end
+    end
+
+    return info
+end
+
+local function BuildCompactMinAvgMaxLine(text)
+    if not text then
+        return nil
+    end
+
+    return string.format("|c9F9780Min/Avg/Max: %s|r", text)
+end
+
+local function BuildCompactVersusTtcLine(text)
+    if not text then
+        return nil
+    end
+
+    local prefix = "|cA0A070"
+    if text:find("дешевле") then
+        prefix = "|c6AB87A"
+    elseif text:find("дороже") then
+        prefix = "|cD46A6A"
+    end
+
+    return string.format("%svs TTC: %s|r", prefix, text)
+end
+
+local function AppendIfValue(lines, value)
+    if value then
+        lines[#lines + 1] = value
+    end
+end
+
+local function BuildCompactOverlayBaseLines(info)
+    local compact = {}
+
+    AppendIfValue(compact, info.ttc and string.format("|cD8C06ATTC: %s|r", info.ttc) or nil)
+    AppendIfValue(compact, BuildCompactMinAvgMaxLine(info.minAvgMax))
+    AppendIfValue(compact, info.stackTotal and string.format("|cD8C06ATTC x%s|r", info.stackTotal:sub(2)) or nil)
+
+    return compact
+end
+
+function bridge:_buildCompactOverlayLines(lines, source)
+    if type(lines) ~= "table" or #lines == 0 then
+        return lines
+    end
+
+    local info = ParseCompactOverlayInfo(lines)
+
+    if source == "bag" then
+        local compact = BuildCompactOverlayBaseLines(info)
+
+        AppendIfValue(compact, info.vendor and string.format("|cC9B36BVendor: %s|r", info.vendor) or nil)
+        AppendIfValue(compact, info.junk == "Yes" and "|cB088D9Junk: Yes|r" or nil)
+        AppendIfValue(compact, BuildCompactVersusTtcLine(info.versusTtc))
+
+        if #compact > 0 or info.junk ~= nil then
+            return compact
+        end
+    end
+
+    local compact = BuildCompactOverlayBaseLines(info)
+    AppendIfValue(compact, info.vendor and string.format("|cC9B36BVendor: %s|r", info.vendor) or nil)
+    AppendIfValue(compact, BuildCompactVersusTtcLine(info.versusTtc))
+
+    if #compact > 0 then
+        return compact
+    end
+
+    return lines
+end
+
+function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount)
+    if type(zo_callLater) ~= "function" then
+        return false
+    end
+
+    retryCount = tonumber(retryCount) or 0
+    if retryCount >= 6 then
+        return false
+    end
+
+    zo_callLater(function()
+        bridge:_showOverlayLines(lines, source, tooltipControl, retryCount + 1)
+    end, 40)
+
+    LogTrace("Overlay show delayed until tooltip anchor is ready")
+    return true
+end
+
+function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount)
+    if type(lines) ~= "table" or #lines == 0 then
+        LogTrace("Overlay show skipped: no lines")
+        self:_hideOverlay()
+        return
+    end
+
+    local overlay = self:_ensureOverlayWindow()
+    if not overlay or not overlay.label then
+        LogDebug("Overlay show failed: overlay or label missing")
+        return
+    end
+
+    local overlayLines = self:_buildCompactOverlayLines(lines, source)
+    local formattedLines = {}
+    for i = 1, #overlayLines do
+        local line = overlayLines[i]
+        if type(line) == "string" and line:find("|c") then
+            formattedLines[#formattedLines + 1] = line
+        else
+            formattedLines[#formattedLines + 1] = FormatTooltipLine(line)
+        end
+    end
+
+    self._overlaySource = source
+    self._overlayTooltipControl = tooltipControl
+    local useBackdrop = self:_shouldUseOverlayBackdrop(source)
+    if overlay.backdrop and type(overlay.backdrop.SetHidden) == "function" then
+        overlay.backdrop:SetHidden(not useBackdrop)
+    end
+    if overlay.accentBackdrop and type(overlay.accentBackdrop.SetHidden) == "function" then
+        overlay.accentBackdrop:SetHidden(not useBackdrop)
+    end
+    if overlay.borderTop and type(overlay.borderTop.SetHidden) == "function" then
+        overlay.borderTop:SetHidden(not useBackdrop)
+    end
+    if overlay.borderBottom and type(overlay.borderBottom.SetHidden) == "function" then
+        overlay.borderBottom:SetHidden(not useBackdrop)
+    end
+    if overlay.borderLeft and type(overlay.borderLeft.SetHidden) == "function" then
+        overlay.borderLeft:SetHidden(not useBackdrop)
+    end
+    if overlay.borderRight and type(overlay.borderRight.SetHidden) == "function" then
+        overlay.borderRight:SetHidden(not useBackdrop)
+    end
+    self:_renderOverlayLines(overlay, formattedLines)
+    self:_resizeOverlayToText(overlay)
+
+    local anchored = self:_positionOverlay()
+    if not anchored then
+        if self:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount) then
+            return
+        end
+    end
+
+    if type(overlay.window.SetHandler) == "function" then
+        overlay.window:SetHandler("OnUpdate", function()
+            bridge:_refreshOverlayVisibility()
+        end)
+    end
+    overlay.window:SetHidden(false)
+    LogDebug(string.format("Overlay shown: source=%s lines=%d", tostring(source), #lines))
+end
+
+function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, listingPrice, source)
+    if tooltip == nil or type(itemLink) ~= "string" or itemLink == "" then
+        return
+    end
+
+    -- Always log to diagnose stackCount issue (gated by self.debug flag)
+    if self.debug and type(d) == "function" then
+        d("[LGCMB] _appendByLink: " .. tostring(itemLink):sub(1, 50))
+        d("[LGCMB]   sc=" .. tostring(stackCount) .. " price=" .. tostring(listingPrice))
+    end
+
+    -- Dedup: include stackCount/listingPrice in key so same item at different TH prices
+    -- doesn't get skipped within the 200ms window.
+    local dedupKey = itemLink .. "|" .. tostring(stackCount or "") .. "|" .. tostring(listingPrice or "")
+    local now = type(GetGameTimeMilliseconds) == "function" and GetGameTimeMilliseconds() or 0
+    if tooltip._lgcmbLastKey == dedupKey and now - (tooltip._lgcmbLastLinkTime or 0) < 200 then
+        return
+    end
+    tooltip._lgcmbLastKey = dedupKey
+    tooltip._lgcmbLastLinkTime = now
+
+    local lines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice, true)
+
+    if #lines == 0 then
+        self:_hideOverlay()
+        return
+    end
+
+    self:_showOverlayLines(lines, source, tooltip)
+end
+
+function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
+    local lines = self:_buildTooltipInfoLines(bagId, slotIndex)
+
+    if #lines == 0 then
+        self:_hideOverlay()
+        return
+    end
+
+    local itemLink = self:_getItemLinkFromBagAndSlot(bagId, slotIndex)
+    self:_showOverlayLines(lines, source, tooltip)
+end
+
+-- Look up the purchase price (and stack count) of a trading house search result that
+-- matches the given item link.  Returns totalPrice, stack2 (both may be nil on failure).
+-- stackCount and sellerName are used as optional filters when provided; if itemLink
+-- matching fails (e.g., link style mismatch) we fall back to returning data from the
+-- first result whose item ID matches.
+function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
+    -- GetTradingHouseSearchResultItemInfo(i) →
+    --   icon, itemName, displayQuality, stackCount, sellerName, timeRemaining, purchasePrice, currencyType, uid
+    -- GetTradingHouseSearchResultItemLink(i) → itemLink
+    local getInfoFn = type(GetTradingHouseSearchResultItemInfo) == "function"
+                      and GetTradingHouseSearchResultItemInfo
+                   or type(GetGuildStoreSearchResultItemInfo) == "function"
+                      and GetGuildStoreSearchResultItemInfo
+                   or nil
+    local getLinkFn = type(GetTradingHouseSearchResultItemLink) == "function"
+                      and GetTradingHouseSearchResultItemLink
+                   or type(GetGuildStoreSearchResultItemLink) == "function"
+                      and GetGuildStoreSearchResultItemLink
+                   or nil
+
+    if not getInfoFn then
+        if bridge.debug and type(d) == "function" then
+            d("[LGCMB] lookup: no item-info API found")
+        end
+        return nil, nil
+    end
+
+    -- Extract the numeric item-type ID from a link string for fuzzy fallback.
+    local function itemIdFromLink(link)
+        if type(link) ~= "string" then return nil end
+        return link:match("|H%d+:item:(%d+):")
+    end
+    local targetId = itemIdFromLink(itemLink)
+
+    -- APPROACH 1: Gamepad TH browse list — read DIRECTLY from scroll list data entries.
+    -- ESO stores itemLink, stackCount, purchasePrice in each entry's data table.
+    -- This is reliable even when GetTradingHouseSearchResultItemLink is unavailable.
+    -- We also verify the link matches before trusting the data.
+    if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
+        local scene = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS
+        local list = scene.itemList or scene.list or scene.parametricList
+                  or (scene.categoryList and scene.categoryList.list)
+        if list then
+            local selectedData = nil
+            if type(list.GetTargetData) == "function" then
+                local ok2, d2 = pcall(function() return list:GetTargetData() end)
+                if ok2 then selectedData = d2 end
+            end
+            if not selectedData and type(ZO_ScrollList_GetSelectedData) == "function" then
+                local ok2, d2 = pcall(ZO_ScrollList_GetSelectedData, list)
+                if ok2 and type(d2) == "table" then selectedData = d2 end
+            end
+            if selectedData then
+                -- Try to read all fields directly from data (most reliable path).
+                -- ESO TH browse result entries contain: itemLink, stackCount, purchasePrice.
+                local dataLink = selectedData.itemLink or selectedData.link
+                local dataSc   = selectedData.stackCount or selectedData.count
+                local dataPrice = selectedData.purchasePrice
+
+                if type(dataLink) == "string" and dataLink:find("|H") and dataLink == itemLink
+                   and type(dataSc) == "number" and type(dataPrice) == "number" then
+                    if bridge.debug and type(d) == "function" then
+                        d("[LGCMB] lookup: A1 from data fields sc=" .. tostring(dataSc) .. " price=" .. tostring(dataPrice))
+                    end
+                    return dataPrice, dataSc
+                end
+
+                -- Fallback: use slotIndex + getInfoFn, verified via getLinkFn or data.itemLink.
+                local slotIndex = selectedData.slotIndex or selectedData.index or selectedData.slot
+                if type(slotIndex) == "number" then
+                    local slotLink = nil
+                    if getLinkFn then
+                        local okL, l = pcall(getLinkFn, slotIndex)
+                        if okL then slotLink = l end
+                    elseif type(dataLink) == "string" and dataLink:find("|H") then
+                        slotLink = dataLink  -- use data.itemLink as verification source
+                    end
+                    local linkMatches = (slotLink == itemLink)
+                    if bridge.debug and type(d) == "function" then
+                        d("[LGCMB] lookup: A1 slot=" .. tostring(slotIndex)
+                            .. " slotLink=" .. tostring(slotLink and slotLink:sub(1,30) or "nil")
+                            .. " match=" .. tostring(linkMatches))
+                    end
+                    -- Trust the scroll list's current selection: GetTargetData() is up-to-date
+                    -- when LayoutItem fires (scene updates list selection before calling LayoutItem).
+                    -- Same-type listings share itemLink, so link-matching is unreliable;
+                    -- slotIndex uniquely identifies a listing and getInfoFn gives its exact data.
+                    local ok2, _, _, _, sc, _, _, totalPrice = pcall(getInfoFn, slotIndex)
+                    if ok2 and type(totalPrice) == "number" then
+                        if bridge.debug and type(d) == "function" then
+                            d("[LGCMB] lookup: A1 result sc=" .. tostring(sc)
+                                .. " price=" .. tostring(totalPrice)
+                                .. " linkVerified=" .. tostring(linkMatches))
+                        end
+                        return totalPrice, sc
+                    end
+                    -- getInfoFn failed — fall through to scan.
+                else
+                    if bridge.debug and type(d) == "function" then
+                        local keys = ""
+                        for k, _ in pairs(selectedData) do keys = keys .. tostring(k) .. " " end
+                        d("[LGCMB] lookup: A1 data keys=" .. keys:sub(1, 120))
+                    end
+                end
+            else
+                if bridge.debug and type(d) == "function" then
+                    d("[LGCMB] lookup: GAMEPAD_TH_BROWSE list=" .. tostring(list)
+                        .. " ZO_SL_fn=" .. tostring(type(ZO_ScrollList_GetSelectedData) == "function"))
+                end
+            end
+        else
+            if bridge.debug and type(d) == "function" then
+                d("[LGCMB] lookup: GAMEPAD_TH_BROWSE no list (itemList=" .. tostring(scene.itemList)
+                    .. " list=" .. tostring(scene.list)
+                    .. " parametricList=" .. tostring(scene.parametricList) .. ")")
+            end
+        end
+    end
+
+    -- APPROACH 2: Walk all visible scroll-list entries and find one matching itemLink.
+    -- This works even without GetTradingHouseSearchResultItemLink by reading data.itemLink
+    -- directly from each entry.  Falls back to getInfoFn scan when data fields are absent.
+    if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
+        local scene = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS
+        local list = scene.itemList or scene.list or scene.parametricList
+                  or (scene.categoryList and scene.categoryList.list)
+        -- ZO_ScrollList exposes the underlying data array via .data (keyboard)
+        -- or via iteration helpers.  Try to iterate all entries.
+        if list then
+            local allData = nil
+            -- ZO_ScrollList stores scroll data in list.scrollControl.data or .data arrays
+            local scrollCtrl = type(list.GetScrollControl) == "function" and list:GetScrollControl() or list
+            if type(scrollCtrl) == "table" then
+                allData = scrollCtrl.data or scrollCtrl.scrollData
+            end
+            if type(allData) == "table" then
+                for _, entry in ipairs(allData) do
+                    local ed = type(entry) == "table" and (entry.data or entry) or nil
+                    if type(ed) == "table" then
+                        local eLink  = ed.itemLink or ed.link
+                        local eSc    = ed.stackCount or ed.count
+                        local ePrice = ed.purchasePrice
+                        if type(eLink) == "string" and eLink == itemLink
+                           and type(eSc) == "number" and type(ePrice) == "number" then
+                            if bridge.debug and type(d) == "function" then
+                                d("[LGCMB] lookup: A2 scrollData match sc=" .. tostring(eSc)
+                                    .. " price=" .. tostring(ePrice))
+                            end
+                            return ePrice, eSc
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- APPROACH 3: Scan results via getInfoFn iteration (requires getLinkFn to match correctly).
+    -- Without getLinkFn this can only return the first result, so skip if no link function.
+    if not getLinkFn then
+        if bridge.debug and type(d) == "function" then
+            d("[LGCMB] lookup: no linkFn, skipping scan (would return wrong item)")
+        end
+        return nil, nil
+    end
+
+    local fallbackPrice, fallbackStack = nil, nil
+
+    for i = 1, 200 do
+        local okInfo, _, _, _, sc, seller2, _, totalPrice = pcall(getInfoFn, i)
+        if not okInfo or type(totalPrice) ~= "number" then break end
+
+        local passFilters = (not sellerName or seller2 == sellerName)
+            and (not stackCount or not (type(stackCount) == "number") or sc == stackCount)
+        if passFilters then
+            local okLink, link2 = pcall(getLinkFn, i)
+            if bridge.debug and type(d) == "function" and i <= 3 then
+                d("[LGCMB] lookup[" .. i .. "]: link2=" .. tostring(link2):sub(1,40)
+                    .. " match=" .. tostring(okLink and link2 == itemLink))
+            end
+                if okLink and link2 == itemLink then
+                    return totalPrice, sc   -- exact match
+                end
+                if targetId and fallbackPrice == nil and itemIdFromLink(link2) == targetId then
+                    fallbackPrice, fallbackStack = totalPrice, sc
+                end
+        end
+    end
+
+    if bridge.debug and type(d) == "function" and fallbackPrice == nil then
+        d("[LGCMB] lookup: A3 scan done, no match")
+    end
+
+    return fallbackPrice, fallbackStack
 end
 
 function bridge:_hookTooltipPrice()
@@ -1177,12 +2394,12 @@ function bridge:_hookTooltipPrice()
     end
 
     LogTrace("Attempting to hook tooltip price...")
-    
+
     if type(GAMEPAD_TOOLTIPS) ~= "table" then
         LogTrace("GAMEPAD_TOOLTIPS not available (type: " .. type(GAMEPAD_TOOLTIPS) .. ")")
         return false
     end
-    
+
     if type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
         LogTrace("GAMEPAD_TOOLTIPS.GetTooltip not available")
         return false
@@ -1198,25 +2415,77 @@ function bridge:_hookTooltipPrice()
     for i = 1, #tooltipTypes do
         local tooltipType = tooltipTypes[i]
         LogTrace("Checking tooltip type " .. tostring(i) .. ": " .. tostring(tooltipType))
-        
+
         local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
         LogTrace("Got tooltip: " .. type(tooltip))
-        
+
         if tooltip ~= nil then
-            LogTrace("Tooltip has LayoutBagItem: " .. tostring(type(tooltip.LayoutBagItem)))
-            LogTrace("Already wrapped: " .. tostring(tooltip._lgcmbTooltipWrapped))
-            
-            if type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbTooltipWrapped then
-                local base = tooltip.LayoutBagItem
-                tooltip.LayoutBagItem = function(control, bagId, slotIndex, ...)
-                    local result1, result2, result3, result4, result5, result6 = base(control, bagId, slotIndex, ...)
-                    bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex)
-                    LogTrace("Base LayoutBagItem called")
-                    return result1, result2, result3, result4, result5, result6
-                end
-                tooltip._lgcmbTooltipWrapped = true
+            if tooltipType == GAMEPAD_RIGHT_TOOLTIP
+                and type(tooltip.SetHidden) == "function"
+                and not tooltip._lgcmbOverlayHideHooked
+            then
+                ZO_PostHook(tooltip, "SetHidden", function(ctrl, hidden)
+                    if hidden then
+                        bridge:_hideOverlay()
+                        LogTrace("Overlay hidden because GAMEPAD_RIGHT_TOOLTIP was hidden")
+                    end
+                end)
+                tooltip._lgcmbOverlayHideHooked = true
                 hookedAny = true
-                LogTrace("Successfully hooked tooltip type " .. tostring(i))
+                LogTrace("Hooked GAMEPAD_RIGHT_TOOLTIP hide for overlay cleanup")
+            end
+
+            -- LayoutBagItem: append after the base tooltip is fully laid out.
+            if type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbBagHooksInstalled then
+                ZO_PostHook(tooltip, "LayoutBagItem", function(ctrl, bagId, slotIndex, ...)
+                    if not bridge.enabled then return end
+                    ctrl._lgcmbLastKey = nil
+                    bridge:_appendGamepadTooltipInfo(ctrl, bagId, slotIndex, "bag")
+                end)
+                tooltip._lgcmbBagHooksInstalled = true
+                hookedAny = true
+                LogDebug("Hooked LayoutBagItem post-layout on tooltip " .. tostring(i))
+            end
+
+            -- LayoutFurnishingCraftingResult: append after the crafting result tooltip is laid out.
+            if type(tooltip.LayoutFurnishingCraftingResult) == "function" and not tooltip._lgcmbFurnCraftHooked then
+                ZO_PostHook(tooltip, "LayoutFurnishingCraftingResult", function(ctrl, ...)
+                    if not bridge.enabled then return end
+                    bridge._templateCraftingOverlayActive = true
+                    if not bridge:_shouldShowTemplateCraftingOverlay() then
+                        bridge:_hideOverlay()
+                        return
+                    end
+                    local link = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
+                    if bridge.debug and type(d) == "function" then
+                        d("[LGCMB] LayoutFurnishingCraftingResult: link=" .. tostring(link):sub(1, 50))
+                    end
+                    if type(link) == "string" and link:find("|H") then
+                        ctrl._lgcmbLastKey = nil
+                        bridge:_appendGamepadTooltipInfoByLink(ctrl, link, nil, nil, "furncraft")
+                    end
+                end)
+                tooltip._lgcmbFurnCraftHooked = true
+                hookedAny = true
+                LogDebug("Hooked LayoutFurnishingCraftingResult on tooltip " .. tostring(i))
+            end
+
+            if type(tooltip.LayoutItemLink) == "function" and not tooltip._lgcmbCraftItemLinkHooked then
+                ZO_PostHook(tooltip, "LayoutItemLink", function(ctrl, itemLink, ...)
+                    if not bridge.enabled or not bridge._craftingStationActive then return end
+                    if not bridge:_shouldShowTemplateCraftingOverlay() then
+                        bridge:_hideOverlay()
+                        return
+                    end
+
+                    if IsValidItemLink(itemLink) then
+                        ctrl._lgcmbLastKey = nil
+                        bridge:_appendGamepadTooltipInfoByLink(ctrl, itemLink, nil, nil, "furncraft")
+                    end
+                end)
+                tooltip._lgcmbCraftItemLinkHooked = true
+                hookedAny = true
+                LogDebug("Hooked LayoutItemLink for crafting tooltips on tooltip " .. tostring(i))
             end
         end
     end
@@ -1247,6 +2516,306 @@ function bridge:_hookTooltipPrice()
 
     LogTrace("No tooltips were hooked")
     return false
+end
+
+-- Hook crafting station result tooltips in gamepad mode.
+-- Follows the same pattern as TTC (SecurePostHook on the crafting singleton,
+-- get the item link from crafting API, append to the active gamepad tooltip).
+-- This handles cases where the crafting system calls LayoutFurnishingCraftingResult
+-- (no item link in args) instead of LayoutItemLink.
+function bridge:_hookCraftingTooltips()
+    if self._craftingTooltipsHooked then return true end
+    if type(SecurePostHook) ~= "function" then return false end
+    if type(GAMEPAD_TOOLTIPS) ~= "table" then return false end
+
+    local function appendToActiveCraftingTooltip(link)
+        if not bridge.enabled then return end
+        if type(link) ~= "string" or not link:find("|H") then return end
+        if not bridge:_shouldShowTemplateCraftingOverlay() then return end
+        if bridge.debug and type(d) == "function" then
+            d("[LGCMB] craft.append: " .. tostring(link):sub(1, 50))
+        end
+        -- Try tooltip types in order: LEFT is the typical crafting preview tooltip
+        local types = {GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP}
+        for _, tType in ipairs(types) do
+            if type(tType) == "number" then
+                local tt = type(GAMEPAD_TOOLTIPS.GetTooltip) == "function"
+                    and GAMEPAD_TOOLTIPS:GetTooltip(tType) or nil
+                if tt ~= nil then
+                    bridge:_appendGamepadTooltipInfoByLink(tt, link, nil, nil, "furncraft")
+                    return
+                end
+            end
+        end
+    end
+
+    local hooked = false
+
+    -- Smithing / clothier / woodworking creation (keyboard class; fires in gamepad mode only if
+    -- ZO_GamepadSmithingCreation does NOT override SetupResultTooltip, so kept as fallback).
+    -- PRE-hook caches the link so LayoutFurnishingCraftingResult (hooked in _hookTooltipPrice)
+    -- can pick it up before the tooltip is laid out.
+    if type(ZO_SmithingCreation) == "table"
+        and type(ZO_SmithingCreation.SetupResultTooltip) == "function"
+    then
+        ZO_PreHook(ZO_SmithingCreation, "SetupResultTooltip",
+            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                local ok, link = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                bridge._pendingCraftingLink = (ok and type(link) == "string" and link:find("|H")) and link or nil
+                if bridge.debug and type(d) == "function" then
+                    d("[LGCMB] craft.SetupResult(KB) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
+                end
+            end)
+        SecurePostHook(ZO_SmithingCreation, "SetupResultTooltip",
+            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
+                local link = bridge._pendingCraftingLink
+                appendToActiveCraftingTooltip(link)
+            end)
+        hooked = true
+        LogDebug("Hooked ZO_SmithingCreation.SetupResultTooltip")
+    end
+
+    -- Gamepad smithing creation — overrides SetupResultTooltip and uses its own
+    -- resultTooltip.tip floating control instead of the standard GAMEPAD_TOOLTIPS pool.
+    -- PRE-hook caches the link (for LayoutFurnishingCraftingResult top-inject path).
+    -- POST-hook appends directly to resultTooltip.tip as a second path.
+    if type(ZO_GamepadSmithingCreation) == "table"
+        and type(ZO_GamepadSmithingCreation.SetupResultTooltip) == "function"
+    then
+        ZO_PreHook(ZO_GamepadSmithingCreation, "SetupResultTooltip",
+            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                local ok, link = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                bridge._pendingCraftingLink = (ok and type(link) == "string" and link:find("|H")) and link or nil
+                if not IsValidItemLink(bridge._pendingCraftingLink) then
+                    bridge._pendingCraftingLink = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
+                end
+                bridge._templateCraftingOverlayActive = IsValidItemLink(bridge._pendingCraftingLink)
+                if bridge.debug and type(d) == "function" then
+                    d("[LGCMB] craft.SetupResult(GP) pre: link=" .. tostring(bridge._pendingCraftingLink):sub(1, 50))
+                end
+            end)
+        SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip",
+            function(selfArg, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
+                if not bridge.enabled then return end
+                local link = bridge._pendingCraftingLink
+                if not IsValidItemLink(link) then
+                    link = bridge:_resolveCurrentFurnishingLink(selfArg)
+                    bridge._pendingCraftingLink = link
+                end
+                bridge._templateCraftingOverlayActive = IsValidItemLink(link)
+                if type(link) ~= "string" or not link:find("|H") then
+                    if bridge.debug and type(d) == "function" then
+                        d("[LGCMB] craft.SetupResult(GP) post: no link")
+                    end
+                    return
+                end
+                -- Also try the dedicated resultTooltip panel used by gamepad smithing.
+                local tip = selfArg and selfArg.resultTooltip and selfArg.resultTooltip.tip
+                if bridge.debug and type(d) == "function" then
+                    d("[LGCMB] craft.SetupResult(GP) post: link=" .. tostring(link):sub(1,40)
+                        .. " tip=" .. tostring(tip ~= nil and type(tip.AddLine) == "function"))
+                end
+                if tip then
+                    bridge:_appendGamepadTooltipInfoByLink(tip, link, nil, nil, "furncraft")
+                end
+            end)
+        hooked = true
+        LogDebug("Hooked ZO_GamepadSmithingCreation.SetupResultTooltip")
+    end
+
+    -- Provisioner (food/drink recipes)
+    if type(ZO_Provisioner) == "table"
+        and type(ZO_Provisioner.RefreshRecipeDetails) == "function"
+    then
+        SecurePostHook(ZO_Provisioner, "RefreshRecipeDetails", function(ctrl)
+            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
+            local recipeListIndex = type(ctrl.GetSelectedRecipeListIndex) == "function" and ctrl:GetSelectedRecipeListIndex() or nil
+            local recipeIndex     = type(ctrl.GetSelectedRecipeIndex)     == "function" and ctrl:GetSelectedRecipeIndex()     or nil
+            if recipeListIndex and recipeIndex then
+                local link = GetRecipeResultItemLink(recipeListIndex, recipeIndex)
+                appendToActiveCraftingTooltip(link)
+            end
+        end)
+        hooked = true
+        LogDebug("Hooked ZO_Provisioner.RefreshRecipeDetails")
+    end
+
+    -- Gamepad provisioner furnishing templates use RefreshRecipeDetails(selectedData)
+    -- and populate the tooltip via resultTooltip.tip:SetProvisionerResultItem(...).
+    if type(ZO_GamepadProvisioner) == "table"
+        and type(ZO_GamepadProvisioner.RefreshRecipeDetails) == "function"
+    then
+        SecurePostHook(ZO_GamepadProvisioner, "RefreshRecipeDetails", function(selfArg, selectedData)
+            if not bridge.enabled then return end
+            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
+
+            local isFurnishingTemplate = type(selectedData) == "table"
+                and ((type(PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING) == "number"
+                    and selectedData.specialIngredientType == PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING)
+                    or (type(PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING) == "number"
+                        and selfArg.filterType == PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING))
+            bridge._templateCraftingOverlayActive = isFurnishingTemplate
+
+            if type(selectedData) ~= "table" then
+                bridge:_hideOverlay()
+                return
+            end
+
+                if not isFurnishingTemplate then
+                bridge:_hideOverlay()
+                return
+            end
+
+            local recipeListIndex = selectedData.recipeListIndex
+            local recipeIndex = selectedData.recipeIndex
+            if recipeListIndex == nil and type(selfArg.GetRecipeData) == "function" then
+                local ok, recipeData = pcall(selfArg.GetRecipeData, selfArg)
+                if ok and type(recipeData) == "table" then
+                    recipeListIndex = recipeData.recipeListIndex or recipeListIndex
+                    recipeIndex = recipeData.recipeIndex or recipeIndex
+                end
+            end
+
+            if recipeListIndex == nil or recipeIndex == nil or type(GetRecipeResultItemLink) ~= "function" then
+                return
+            end
+
+            local ok, link = pcall(GetRecipeResultItemLink, recipeListIndex, recipeIndex)
+            if not ok or not IsValidItemLink(link) then
+                return
+            end
+
+            local tip = selfArg and selfArg.resultTooltip and selfArg.resultTooltip.tip
+            if tip then
+                bridge:_appendGamepadTooltipInfoByLink(tip, link, nil, nil, "furncraft")
+            else
+                appendToActiveCraftingTooltip(link)
+            end
+        end)
+        hooked = true
+        LogDebug("Hooked ZO_GamepadProvisioner.RefreshRecipeDetails")
+    end
+
+    -- Enchanting
+    if type(ZO_Enchanting) == "table"
+        and type(ZO_Enchanting.UpdateTooltip) == "function"
+    then
+        SecurePostHook(ZO_Enchanting, "UpdateTooltip", function()
+            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
+            local link = type(ENCHANTING) == "table"
+                and type(ENCHANTING.GetResultItemLink) == "function"
+                and ENCHANTING:GetResultItemLink() or nil
+            appendToActiveCraftingTooltip(link)
+        end)
+        hooked = true
+        LogDebug("Hooked ZO_Enchanting.UpdateTooltip")
+    end
+
+    -- Alchemy
+    if type(ZO_Alchemy) == "table"
+        and type(ZO_Alchemy.UpdateTooltip) == "function"
+    then
+        SecurePostHook(ZO_Alchemy, "UpdateTooltip", function()
+            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
+            local link = type(ALCHEMY) == "table"
+                and type(ALCHEMY.GetResultItemLink) == "function"
+                and ALCHEMY:GetResultItemLink() or nil
+            appendToActiveCraftingTooltip(link)
+        end)
+        hooked = true
+        LogDebug("Hooked ZO_Alchemy.UpdateTooltip")
+    end
+
+    if hooked then
+        self._craftingTooltipsHooked = true
+        return true
+    end
+    return false
+end
+
+-- Hook the trading-house browse-results tooltip in gamepad mode.
+-- The reliable hook point is the tooltip's own LayoutGuildStoreSearchResult method,
+-- which is attached dynamically when the gamepad trading house UI is opened.
+function bridge:_hookTradingHouseTooltip()
+    if self._tradingHouseTooltipHooked then
+        return true
+    end
+
+    if type(GAMEPAD_TOOLTIPS) ~= "table" then return false end
+    if type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then return false end
+
+    local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(GAMEPAD_RIGHT_TOOLTIP)
+    if not tooltip then return false end
+    if type(tooltip.LayoutGuildStoreSearchResult) ~= "function" then return false end
+    if tooltip._lgcmbTradingHouseLayoutHooked then
+        self._tradingHouseTooltipHooked = true
+        return true
+    end
+
+    ZO_PreHook(tooltip, "LayoutGuildStoreSearchResult", function(ctrl, itemLink, stackCount, sellerName, ...)
+        if not bridge.enabled then
+            return
+        end
+
+        if type(itemLink) ~= "string" or not itemLink:find("|H") then
+            return
+        end
+
+        local listingPrice, resolvedStackCount = bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
+        ctrl._lgcmbPendingInfo = {
+            link = itemLink,
+            stackCount = resolvedStackCount or stackCount,
+            listingPrice = listingPrice,
+        }
+    end)
+
+    ZO_PostHook(tooltip, "LayoutGuildStoreSearchResult", function(ctrl, itemLink, stackCount, sellerName, ...)
+        if not bridge.enabled then return end
+
+        if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
+            local list = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.itemList
+                or GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.list
+                or GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.parametricList
+            bridge._overlayAnchorControl = SafeGetTargetControl(list)
+        end
+
+        if type(itemLink) ~= "string" or not itemLink:find("|H") then
+            bridge:_hideOverlay()
+            if bridge.debug then
+                LogDebug("TH LayoutGuildStoreSearchResult: no valid itemLink")
+            end
+            return
+        end
+
+        ctrl._lgcmbLastKey = nil
+        local pendingInfo = ctrl._lgcmbPendingInfo
+        local effectiveStackCount = pendingInfo and pendingInfo.stackCount or stackCount
+        local listingPrice = pendingInfo and pendingInfo.listingPrice
+
+        if (type(listingPrice) ~= "number" or listingPrice <= 0) and type(itemLink) == "string" and itemLink:find("|H") then
+            local resolvedPrice, resolvedStackCount = bridge:_lookupTradingHouseListingPrice(itemLink, effectiveStackCount, sellerName)
+            if type(resolvedPrice) == "number" and resolvedPrice > 0 then
+                listingPrice = resolvedPrice
+            end
+            if type(resolvedStackCount) == "number" and resolvedStackCount > 0 then
+                effectiveStackCount = resolvedStackCount
+            end
+        end
+
+        bridge:_appendGamepadTooltipInfoByLink(ctrl, itemLink, effectiveStackCount, listingPrice, "guildstore")
+
+        if bridge.debug then
+            LogDebug(string.format("TH layout: sc=%s price=%s seller=%s link=%s",
+                tostring(effectiveStackCount), tostring(listingPrice), tostring(sellerName), tostring(itemLink):sub(1, 30)))
+        end
+    end)
+
+    tooltip._lgcmbTradingHouseLayoutHooked = true
+
+    self._tradingHouseTooltipHooked = true
+    LogDebug("Hooked LayoutGuildStoreSearchResult on gamepad trading house tooltip")
+    return true
 end
 
 function bridge:_scheduleTooltipPriceHookRetry()
@@ -1292,39 +2861,10 @@ function bridge:_initializeSlashCommands()
         end
 
         if cmd == "status" then
-            if type(d) == "function" then
-                local summary, total = self:_summarizeContextRegistry()
-                d(string.format("[%s] enabled=%s debug=%s verbose=%s callbacks=%d",
-                    MAJOR,
-                    tostring(self.enabled),
-                    tostring(self.debug),
-                    tostring(self.debugVerbose),
-                    tonumber(self._callbackCountLast or 0)))
-                d(string.format("[%s] context registry total=%d (%s)", MAJOR, tonumber(total or 0), tostring(summary)))
-            end
+            self:DumpRuntimeStatus()
             return
         end
 
-        if cmd == "on" then
-            self:SetEnabled(true)
-            return
-        end
-        if cmd == "off" then
-            self:SetEnabled(false)
-            return
-        end
-        if cmd == "debug on" then
-            self:SetDebugEnabled(true)
-            return
-        end
-        if cmd == "debug off" then
-            self:SetDebugEnabled(false)
-            return
-        end
-        if cmd == "verbose on" then
-            self:SetDebugVerbose(true)
-            return
-        end
         if cmd == "verbose off" then
             self:SetDebugVerbose(false)
             return
@@ -1413,7 +2953,7 @@ function bridge:_initializeSettingsPanel()
         },
         {
             type = "checkbox",
-            name = "Show TTC price in gamepad tooltip",
+            name = "Show TTC price in gamepad overlay",
             getFunc = function()
                 return self:_shouldShowTtcTooltipPrice()
             end,
@@ -1440,7 +2980,7 @@ function bridge:_initializeSettingsPanel()
         },
         {
             type = "checkbox",
-            name = "Show junk status in gamepad tooltip",
+            name = "Show junk status in gamepad overlay",
             getFunc = function()
                 return self:_shouldShowJunkStatusInTooltip()
             end,
@@ -1452,7 +2992,7 @@ function bridge:_initializeSettingsPanel()
         },
         {
             type = "checkbox",
-            name = "Show vendor price in gamepad tooltip",
+            name = "Show vendor price in gamepad overlay",
             getFunc = function()
                 return self:_shouldShowVendorPriceInTooltip()
             end,
@@ -1460,18 +3000,6 @@ function bridge:_initializeSettingsPanel()
                 self:SetShowVendorPriceInTooltip(value)
             end,
             default = DEFAULTS.showVendorPriceInTooltip,
-            width = "full",
-        },
-        {
-            type = "checkbox",
-            name = "Show bound status in gamepad tooltip",
-            getFunc = function()
-                return self:_shouldShowBoundStatusInTooltip()
-            end,
-            setFunc = function(value)
-                self:SetShowBoundStatusInTooltip(value)
-            end,
-            default = DEFAULTS.showBoundStatusInTooltip,
             width = "full",
         },
         {
@@ -2109,15 +3637,14 @@ function bridge:Initialize()
     self:_initializeSettingsPanel()
 
     local lcm = LibCustomMenu
-    if type(lcm) ~= "table" then
-        LogDebug("LibCustomMenu not found; bridge is idle")
-        return
+    if type(lcm) == "table" then
+        self:_wrapRegisterContextMenu(lcm)
+        self:_importExistingCallbacks(lcm)
+        self:_hookDiscoverSlotActions()
+        self:_hookRefreshKeybindStrip()
+    else
+        LogDebug("LibCustomMenu not found; tooltip/overlay features stay active, context bridge is idle")
     end
-
-    self:_wrapRegisterContextMenu(lcm)
-    self:_importExistingCallbacks(lcm)
-    self:_hookDiscoverSlotActions()
-    self:_hookRefreshKeybindStrip()
     
     -- Попытка подцепить тултипы
     local tooltipHookSuccess = self:_hookTooltipPrice()
@@ -2125,12 +3652,26 @@ function bridge:Initialize()
         LogDebug("Initial tooltip hook failed, scheduling retry...")
         self:_scheduleTooltipPriceHookRetry()
     end
-    
+
+    -- Тултипы крафтовых станций (gamepad-режим)
+    self:_hookCraftingTooltips()
+
+    -- Тултип торгового дома (gamepad-режим)
+    self:_hookTradingHouseTooltip()
+
     -- Дополнительная попытка в EVENT_PLAYER_ACTIVATED
     self:_scheduleTooltipPriceHookRetry()
     self:_registerPlayerActivatedHook()
 
     self._initialized = true
+    LogDebug(string.format(
+        "Initialize summary: tooltipHooks=%s crafting=%s tradingHouse=%s overlay=%s enabled=%s",
+        tostring(self._tooltipPriceHooked),
+        tostring(self._craftingTooltipsHooked == true),
+        tostring(self._tradingHouseTooltipHooked),
+        tostring(true),
+        tostring(self.enabled)
+    ))
     LogDebug("Initialized")
 end
 
@@ -2150,13 +3691,57 @@ function bridge:_registerPlayerActivatedHook()
         local hooked = bridge:_hookTooltipPrice()
         if not hooked then
             bridge:_scheduleTooltipPriceHookRetry()
-            return
         end
-
+        bridge:_hookCraftingTooltips()
+        bridge:_hookTradingHouseTooltip()
         if type(EVENT_MANAGER.UnregisterForEvent) == "function" then
             EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
         end
     end)
+
+    -- LayoutGuildStoreSearchResult is added to tooltip instances dynamically the first
+    -- time the trading house is opened.  Hook on EVENT_OPEN_TRADING_HOUSE so we catch
+    -- that moment reliably, even if the player never triggered EVENT_PLAYER_ACTIVATED
+    -- while in front of a TH.
+    local TH_OPEN_NS = MAJOR .. "_THOpen"
+    EVENT_MANAGER:RegisterForEvent(TH_OPEN_NS, EVENT_OPEN_TRADING_HOUSE, function()
+        bridge:_hookTradingHouseTooltip()
+        if bridge.debug and type(d) == "function" then
+            d("[LGCMB] EVENT_OPEN_TRADING_HOUSE: retried TH tooltip hook")
+        end
+    end)
+
+    local TH_CLOSE_NS = MAJOR .. "_THClose"
+    if type(EVENT_CLOSE_TRADING_HOUSE) == "number" then
+        EVENT_MANAGER:RegisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE, function()
+            bridge:_hideOverlay()
+            LogTrace("Overlay hidden on EVENT_CLOSE_TRADING_HOUSE")
+        end)
+    end
+
+    local CRAFT_OPEN_NS = MAJOR .. "_CraftOpen"
+    if type(EVENT_CRAFTING_STATION_INTERACT) == "number" then
+        EVENT_MANAGER:RegisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT, function(_, craftSkill, sameStation, craftMode)
+            bridge._craftingStationActive = true
+            bridge._templateCraftingOverlayActive = false
+            bridge:_hookTooltipPrice()
+            bridge:_hookCraftingTooltips()
+            if bridge.debug and type(d) == "function" then
+                d(string.format("[LGCMB] EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
+                    tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
+            end
+        end)
+    end
+
+    local CRAFT_CLOSE_NS = MAJOR .. "_CraftClose"
+    if type(EVENT_END_CRAFTING_STATION_INTERACT) == "number" then
+        EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
+            bridge._craftingStationActive = false
+            bridge._templateCraftingOverlayActive = false
+            bridge:_hideOverlay()
+            LogTrace("Overlay hidden on EVENT_END_CRAFTING_STATION_INTERACT")
+        end)
+    end
 
     self._playerActivatedHookRegistered = true
 end
