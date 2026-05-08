@@ -1,0 +1,38 @@
+[B]LibGamepadContextMenuBridge[/B]
+
+ESO library addon that mirrors inventory entries created through [B]LibCustomMenu:RegisterContextMenu(...)[/B] into gamepad inventory action lists.
+
+[B]Version 1.5.1 Highlights[/B]
+[list]
+[*]Moved tooltip augmentation to a dedicated overlay window for cleaner and more stable gamepad rendering.
+[*]Added adaptive overlay sizing/placement with screen-bound clamping to improve readability across UI states.
+[*]Improved furnishing crafting context detection and material-cost rendering in gamepad crafting flows.
+[*]Added fallback ingredient resolution paths for furnishing recipes when some recipe APIs are unavailable at runtime.
+[*]Refined material-cost output: cleaner ingredient list, quality-colored lines, compact totals, and crafted-vs-material delta.
+[*]Updated TTC comparison wording to English: [B]cheaper[/B], [B]overpriced[/B], [B]fair[/B].
+[*]Cleaned temporary diagnostics and reduced debug noise in crafting-related paths.
+[*]Refactored duplicated crafting context/link code into reusable helpers to simplify maintenance.
+[/list]
+
+[B]Core Features[/B]
+[list]
+[*]Makes keyboard/mouse inventory context actions available in gamepad mode.
+[*]Mirrors regular custom menu entries into gamepad item actions.
+[*]Supports submenu entries.
+[*]Provides a native fallback for [B]Mark as Junk / Unmark as Junk[/B] when missing in base gamepad flow.
+[*]Shows optional tooltip info blocks for TTC and item metadata.
+[/list]
+
+[B]Dependencies[/B]
+[list]
+[*]Required: LibCustomMenu >= 730
+[*]Optional: LibAddonMenu-2.0
+[*]Optional for price display: TamrielTradeCentre
+[/list]
+
+[B]Installation[/B]
+Copy the folder [B]LibGamepadContextMenuBridge[/B] into:
+Documents/Elder Scrolls Online/live/AddOns/
+
+[B]Notes[/B]
+This add-on is not created by, affiliated with, or sponsored by ZeniMax Media Inc. or its affiliates.

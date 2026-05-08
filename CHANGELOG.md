@@ -1,16 +1,14 @@
 # Changelog
 
 ## 1.5.1
-- Переход с внедрения данных в нативные тултипы на отдельные overlay-окна (overlay system).
-- Реализован `_ensureOverlayWindow`: создание top-level окна с backdrop, accent-backdrop и рамкой из 4 полос (gold, 0.72/0.66/0.42).
-- Реализован `_ensureOverlayLineLabels`: динамическое создание строковых label-контролов с anchor-цепочкой.
-- Реализован `_renderOverlayLines`: посрочная отрисовка с управлением высотой скрытых строк.
-- Реализован `_resizeOverlayToText`: адаптивная ширина/высота окна по source (bag/guildstore/furncraft) и размеру тултипа.
-- Реализован `_positionOverlay`: якорение overlay внутри/под активным тултипом с source-специфичными insets.
-- Реализован `_refreshOverlayVisibility`: OnUpdate-охранник через singleton-closure (`_onRefreshOverlay`) с 100ms throttle.
-- Реализован `_buildCompactOverlayLines`: компактное представление TTC/MinAvgMax/StackTotal/Vendor/Junk/vsTTC.
-- Реализован `_scheduleOverlayShowRetry`: повторные попытки показа overlay (до 6×40ms) до готовности тултипа-якоря.
-- Все источники (bag, guildstore, furncraft) переведены на overlay вместо `AddLine`/`AddVerticalPadding` в тултип.
+- Reworked tooltip rendering to use a dedicated overlay window instead of injecting lines directly into native gamepad tooltips.
+- Added adaptive overlay sizing and placement per source (`bag`, `guildstore`, `furncraft`) with screen-bound clamping.
+- Improved furnishing crafting integration by resolving recipe/pattern context more reliably and appending material-cost lines only in furncraft flow.
+- Added robust ingredient collection fallbacks for furnishing recipes (including current-recipe APIs when classic recipe APIs are missing in runtime).
+- Improved material-cost presentation: cleaned invalid placeholder entries, quality-colored material lines, compact totals, and crafted-vs-material delta.
+- Updated compact TTC comparison wording to English (`cheaper`, `overpriced`, `fair`) while preserving color semantics.
+- Reduced debug noise from furncraft/material tracing paths and cleaned temporary diagnostics used during runtime investigation.
+- Refactored repeated crafting-context code into reusable helpers (`_makeCraftContext`, `_resolveSmithingPatternResultLink`, `_makeRecipeCraftContext`) to keep behavior and shrink duplication.
 
 ## 1.4.6
 - Removed redundant `if bridge.debug then` guards around `LogDebug` calls in `_hookTradingHouseTooltip` (LogDebug already checks `self.debug` internally).
