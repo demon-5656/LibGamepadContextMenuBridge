@@ -11,7 +11,19 @@ local function fresh()
     EVENT_MANAGER = { RegisterForEvent = function() end }
     EVENT_ADD_ON_LOADED = 1
     MENU_ADD_OPTION_LABEL, MENU_ADD_OPTION_HEADER, MENU_ADD_OPTION_CHECKBOX = 1, 2, 3
+    LINK_STYLE_DEFAULT = 0
     ZO_Menu = {}
+    GetTimeStamp = function() return 123456 end
+    d = function() end
+    zo_clamp = function(n, low, high) return math.max(low, math.min(n, high)) end
+    local strings, nextId = {}, 0
+    ZO_CreateStringId = function(name, value)
+        nextId = nextId + 1
+        _G[name], strings[nextId] = nextId, value
+    end
+    GetString = function(id) assert(strings[id], "unknown string ID"); return strings[id] end
+    ZO_Inventory_GetBagAndIndex = function(slot) return slot.bagId, slot.slotIndex end
+    TamrielTradeCentrePrice, LibAddonMenu2 = nil, nil
     dofile(source)
     return LibGamepadContextMenuBridge
 end
@@ -89,44 +101,45 @@ do
     print("PASS overlay lifecycle")
 end
 
--- 3. Exercise the real capture/restore path with FireCallbacks and the cache fallback.
+-- 3. Required LibCustomMenu dispatch: no duplicate cache or replay, even on failure.
 do
-    for _, useFire in ipairs({ true, false }) do
-        for _, outcome in ipairs({ "empty", "entry", "error" }) do
-            local b = fresh()
-            local runs, rawRuns = 0, 0
-            local marker = function() return "original menu" end
-            AddMenuItem, AddCustomMenuItem = marker, marker
-            AddCustomSubMenuItem, AddCustomMenuTooltip = marker, marker
-            ShowMenu, ClearMenu = marker, marker
-            local slotType = function() return 77 end
-            ZO_InventorySlot_GetType = slotType
-            b._resolveNormalizedSlotType = function(_, _, value) return value end
-            b._invokeRawRegistryHandlers = function() rawRuns = rawRuns + 1 end
-            local slot, actions = {}, { m_contextMenuMode = false }
-            local builder = function(gotSlot, gotActions)
-                runs = runs + 1
-                check(gotSlot == slot and gotActions == actions, "builder args incorrect")
-                check(gotActions.m_contextMenuMode == true, "context mode not set during capture")
-                if outcome == "error" then error("intentional builder failure") end
-                if outcome == "entry" then AddCustomMenuItem("Action", function() end) end
-            end
-            local registry = { callbackRegistry = { [1] = { { builder } } } }
-            if useFire then
-                registry.FireCallbacks = function(_, _, gotSlot, gotActions) builder(gotSlot, gotActions) end
-            else
-                b:_rememberContextCallback(builder, 1, {})
-            end
-            LibCustomMenu = { CATEGORY_EARLY = 1, CATEGORY_LATE = 1, contextMenuRegistry = registry }
-            local entries = b:_runContextCallbacks(LibCustomMenu, slot, actions)
-            check(runs == 1 and rawRuns == 0, "builder replayed")
-            check(#entries == (outcome == "entry" and 1 or 0), "captured entries incorrect")
-            check(not b._isCapturing and actions.m_contextMenuMode == false, "capture state not restored")
-            check(ZO_InventorySlot_GetType == slotType, "slot type global not restored")
-            check(AddMenuItem == marker and AddCustomMenuItem == marker and AddCustomSubMenuItem == marker
-                and AddCustomMenuTooltip == marker and ShowMenu == marker and ClearMenu == marker,
-                "menu globals not restored")
+    for _, outcome in ipairs({ "empty", "entry", "error", "partial-error" }) do
+        local b = fresh()
+        local runs = 0
+        local marker = function() return "original menu" end
+        AddMenuItem, AddCustomMenuItem = marker, marker
+        AddCustomSubMenuItem, AddCustomMenuTooltip = marker, marker
+        ShowMenu, ClearMenu = marker, marker
+        local slotType = function() return 77 end
+        ZO_InventorySlot_GetType = slotType
+        b._resolveNormalizedSlotType = function(_, _, value) return value end
+        local slot, actions = {}, { m_contextMenuMode = false }
+        local builder = function(gotSlot, gotActions)
+            runs = runs + 1
+            check(gotSlot == slot and gotActions == actions, "builder args incorrect")
+            check(gotActions.m_contextMenuMode == true, "context mode not set during capture")
+            if outcome == "entry" or outcome == "partial-error" then AddCustomMenuItem("Action", function() end) end
+            if outcome == "error" or outcome == "partial-error" then error("intentional builder failure") end
         end
+        -- Shape and depth semantics from ZO_CallbackObject in API 101051.
+        local registry = { callbackRegistry = { [1] = { { builder } } } }
+        function registry:GetFireCallbackDepth() return self.fireCallbackDepth or 0 end
+        function registry:Clean() end
+        function registry:FireCallbacks(_, gotSlot, gotActions)
+            self.fireCallbackDepth = self:GetFireCallbackDepth() + 1
+            builder(gotSlot, gotActions)
+            self.fireCallbackDepth = self:GetFireCallbackDepth() - 1
+        end
+        LibCustomMenu = { CATEGORY_EARLY = 1, CATEGORY_LATE = 1, contextMenuRegistry = registry, AddMenuItem = marker }
+        local entries = b:_runContextCallbacks(LibCustomMenu, slot, actions)
+        check(runs == 1, "builder replayed")
+        check(#entries == ((outcome == "entry" or outcome == "partial-error") and 1 or 0), "captured entries incorrect")
+        check(registry:GetFireCallbackDepth() == 0, "failed builder leaked callback depth")
+        check(not b._isCapturing and actions.m_contextMenuMode == false, "capture state not restored")
+        check(ZO_InventorySlot_GetType == slotType, "slot type global not restored")
+        check(AddMenuItem == marker and AddCustomMenuItem == marker and AddCustomSubMenuItem == marker
+            and AddCustomMenuTooltip == marker and ShowMenu == marker and ClearMenu == marker
+            and LibCustomMenu.AddMenuItem == marker, "menu globals not restored")
     end
     print("PASS context dispatch")
 end
@@ -139,7 +152,7 @@ do
         b:_captureSubMenuEntries(capture, "Parent", children, parent)
         local actions = { m_slotActions = {} }
         function actions:AddSlotAction(name, callback)
-            self.m_slotActions[#self.m_slotActions + 1] = { name = name, callback = callback }
+            self.m_slotActions[#self.m_slotActions + 1] = { GetString(name), callback }
         end
         b:_appendEntriesToSlotActions(actions, capture.entries, {})
         return actions.m_slotActions
@@ -150,15 +163,15 @@ do
         children = children + 1
     end } }, function(...) check(select("#", ...) == 0, "parent received context"); parents = parents + 1 end)
     check(#rows == 2, "parent action lost")
-    rows[2].callback()
+    rows[2][2]()
     check(children == 1 and parents == 0, "child triggered parent")
-    rows[1].callback()
+    rows[1][2]()
     check(parents == 1 and children == 1, "parent triggered child")
     rows = actionsFor({ { label = "Child", callback = function() end } })
     check(#rows == 1, "unexpected synthetic parent action")
     rows = actionsFor({}, function() parents = parents + 1 end)
     check(#rows == 1, "parent-only submenu lost")
-    rows[1].callback()
+    rows[1][2]()
     check(parents == 2, "parent-only action not executable")
     for _, initial in ipairs({ false, true }) do
         local received, count
@@ -166,7 +179,7 @@ do
             checked = function() return initial end,
             callback = function(...) count = select("#", ...); received = ... end } })
         check(#rows == 1, "checkbox entry lost")
-        rows[1].callback()
+        rows[1][2]()
         check(type(received) == "boolean" and received == not initial and count == 1,
             "checkbox must receive the new boolean state")
     end
@@ -211,4 +224,180 @@ do
     check(contains(lines, "Mat total: 50") and contains(lines, "vs crafted: +150"), "complete recipe calculation incorrect")
     print("PASS material estimates")
 end
-print("PASS all 5 regression groups (" .. checks .. " assertions)")
+-- 6. Native recipe quantities and selected smithing quantity, never inventory stock.
+do
+    local b = fresh()
+    local links = { "|H1:item:101|hmat|h", "|H1:item:102|hmat|h" }
+    GetRecipeInfo = function(list, recipe)
+        check(list == 2 and recipe == 3, "wrong recipe indices")
+        return false, "Recipe", 2
+    end
+    GetRecipeIngredientItemLink = function(list, recipe, index)
+        check(list == 2 and recipe == 3, "wrong ingredient indices")
+        return links[index]
+    end
+    GetRecipeIngredientRequiredQuantity = function(_, _, index) return index == 1 and 3 or 5 end
+    GetCurrentRecipeIngredientCount = function() error("owned counts are not required quantities") end
+    GetRecipeNumIngredients = nil -- Not an API in 101051.
+    GetItemLinkName = function(link) return link end
+    local ingredients = b:_collectRecipeIngredients(2, 3)
+    check(#ingredients == 2 and ingredients[1].quantity == 3 and ingredients[2].quantity == 5, "recipe count/quantity contract wrong")
+    GetSmithingPatternMaterialItemLink = function(pattern, material, style)
+        check(pattern == 7 and material == 2 and style == LINK_STYLE_DEFAULT, "wrong selected smithing material")
+        return links[1]
+    end
+    GetSmithingPatternMaterialItemInfo = function() error("tier baseline must not replace selected quantity") end
+    GetItemStyleMaterialLink = function(id) check(id == 11, "wrong style ID"); return "|H1:item:103|hstyle|h" end
+    GetSmithingTraitItemLink = function(id) check(id == 4, "wrong trait index"); return "|H1:item:104|htrait|h" end
+    ingredients = b:_collectSmithingPatternIngredients({patternIndex=7,materialIndex=2,materialQuantity=150,styleIndex=11,traitIndex=4})
+    check(#ingredients == 3 and ingredients[1].quantity == 150 and ingredients[2].quantity == 1 and ingredients[3].quantity == 1, "smithing recipe omitted selected quantity/style/trait")
+    check(#b:_collectSmithingPatternIngredients({patternIndex=7,materialIndex=2}) == 0, "missing quantity fabricated")
+    print("PASS native crafting contracts")
+end
+
+-- 7. Trading prices belong only to the selected lot, not a similar item.
+do
+    local b = fresh()
+    local link = "|H1:item:501|hitem|h"
+    local selected = { itemLink=link, stackCount=20, sellerName="A", purchasePrice=1234 }
+    -- Native BrowseResults inherits ZO_SortFilterList:GetSelectedData().
+    GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS = { GetSelectedData = function() return selected end }
+    GetTradingHouseSearchResultItemInfo = function() error("must not scan other lots") end
+    local price, count = b:_lookupTradingHouseListingPrice(link,20,"A")
+    check(price == 1234 and count == 20,"selected lot price missing")
+    check(b:_lookupTradingHouseListingPrice(link,20,"B") == nil,"price crossed seller boundary")
+    check(b:_lookupTradingHouseListingPrice(link,10,"A") == nil,"price crossed stack boundary")
+    check(b:_lookupTradingHouseListingPrice("|H1:item:502|hitem|h",20,"A") == nil,"price crossed item boundary")
+    selected.isGuildSpecificItem, selected.slotIndex = true, 9
+    GetGuildSpecificItemLink = function(index) check(index == 9,"wrong guild-specific lot"); return "|H1:collectible:501|hitem|h" end
+    check(b:_lookupTradingHouseListingPrice("|H1:collectible:501|hitem|h",20,"A") == 1234,"guild-specific listing lost")
+    GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS = nil
+    check(b:_lookupTradingHouseListingPrice(link,20,"A") == nil,"absent UI should return no listing")
+    print("PASS exact Trading House lot")
+end
+
+-- 8. Optional addons stay optional; the verified TTC colon contract is used once.
+do
+    local b = fresh()
+    check(b:_getTtcPriceInfo("|H1:item:1|hitem|h") == nil,"TTC unexpectedly required")
+    b:_initializeSettingsPanel()
+    check(not b._settingsPanelRegistered,"settings registered without optional LAM")
+    local calls, provider = 0, nil
+    provider = { GetPriceInfo = function(self, link)
+        check(self == provider and link == "|H1:item:1|hitem|h","TTC calling convention changed")
+        calls = calls + 1
+        return { Avg=15, SuggestedPrice=12 }
+    end }
+    TamrielTradeCentrePrice = provider
+    check(b:_getTtcPriceInfo("|H1:item:1|hitem|h").SuggestedPrice == 12 and calls == 1,"TTC price lost or provider replayed")
+    provider.GetPriceInfo = function() calls=calls+1;error("provider failure") end
+    check(not pcall(function() b:_getTtcPriceInfo("|H1:item:1|hitem|h") end) and calls == 2,"provider errors masked or retried")
+    print("PASS optional dependencies")
+end
+-- 9. Hook actual gamepad classes and per-tooltip targets; no guessed instance globals.
+do
+    local b = fresh()
+    local hookCounts = {}
+    SecurePostHook = function(target, method, hook)
+        check(type(target[method]) == "function", "hook target is not a verified fixture method: " .. method)
+        hookCounts[target] = hookCounts[target] or {}
+        hookCounts[target][method] = (hookCounts[target][method] or 0) + 1
+        local original = target[method]
+        target[method] = function(self, ...)
+            local result = original(self, ...)
+            hook(self, ...)
+            return result
+        end
+    end
+    ZO_PostHookHandler = function(target, event, hook)
+        target.handlers[event] = hook
+    end
+    local function tooltip()
+        return { handlers={}, LayoutBagItem=function() end, LayoutGuildStoreSearchResult=function() end }
+    end
+    GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP = 11, 12, 13
+    local left, right, movable = tooltip(), tooltip(), tooltip()
+    local pool = { [11]=left, [13]=movable }
+    GAMEPAD_TOOLTIPS = { GetTooltip=function(_, kind) return pool[kind] end }
+    check(not b:_hookTooltipPrice(), "partial tooltip installation reported complete")
+    pool[12] = right
+    check(b:_hookTooltipPrice(), "late tooltip was not hooked")
+    check(hookCounts[left].LayoutBagItem == 1 and hookCounts[right].LayoutBagItem == 1, "existing target hooked twice")
+    local bagCalls = 0
+    b._appendGamepadTooltipInfo = function(_, tip, bag, slot)
+        check(tip == left and bag == 1 and slot == 8, "bag hook forwarded wrong parameters")
+        bagCalls = bagCalls + 1
+    end
+    left:LayoutBagItem(1, 8)
+    check(bagCalls == 1,"bag overlay not called exactly once")
+    b._overlayTooltipControl = right
+    left.handlers.OnEffectivelyHidden(left)
+    check(b._overlayTooltipControl == right,"unrelated tooltip hide invalidated current overlay")
+    right.handlers.OnEffectivelyHidden(right)
+    check(b._overlayTooltipControl == nil,"owner tooltip hide left overlay alive")
+    ZO_GamepadSmithingCreation = {SetupResultTooltip=function() end}
+    ZO_GamepadProvisioner = {RefreshRecipeDetails=function() end}
+    ZO_GamepadAlchemy = {UpdateTooltip=function() end}
+    ZO_GamepadEnchanting = {UpdateTooltip=function() end}
+    SMITHING, GAMEPAD_SMITHING = nil, nil -- Not owners of these result-tooltip instances.
+    local shown = {}
+    b._appendGamepadTooltipInfoByLink = function(_, tip, link, _, _, sourceName, context)
+        shown[#shown + 1] = {tip=tip,link=link,source=sourceName,context=context}
+    end
+    GetSmithingPatternResultLink = function(pattern, material, quantity, style, trait, linkStyle)
+        check(pattern == 3 and material == 2 and quantity == 150 and style == 11 and trait == 4 and linkStyle == LINK_STYLE_DEFAULT,
+            "smithing hook altered selected parameters")
+        return "|H1:item:700|hresult|h"
+    end
+    GetRecipeResultItemLink = function(list, recipe, linkStyle)
+        check(list == 2 and recipe == 3 and linkStyle == LINK_STYLE_DEFAULT,"provisioner hook altered recipe indices")
+        return "|H1:item:701|hresult|h"
+    end
+    local function resultControl() return {tip={},IsControlHidden=function() return false end} end
+    local smithing = { resultTooltip=resultControl() }
+    local provisioner = { resultTooltip=resultControl() }
+    check(b:_hookCraftingTooltips(),"gamepad crafting hooks not installed")
+    ZO_GamepadSmithingCreation.SetupResultTooltip(smithing,3,2,150,11,4)
+    check(#shown == 1 and shown[1].tip == smithing.resultTooltip.tip and shown[1].context.materialQuantity == 150
+        and shown[1].context.forceSmithingPatternMaterials,"smithing hook lost its real tooltip/quantity")
+    ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,{recipeListIndex=2,recipeIndex=3})
+    check(#shown == 2 and shown[2].tip == provisioner.resultTooltip.tip and shown[2].context.recipeIndex == 3,
+        "provisioner hook guessed recipe/tooltip instead of native selectedData")
+    ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,nil)
+    check(not b._templateCraftingOverlayActive,"cleared recipe selection kept crafting overlay active")
+    local alchemy = {tooltip=resultControl(),IsCraftable=function() return true end,GetResultItemLink=function() return "|H1:item:702|hpotion|h" end}
+    local enchanting = {resultTooltip=resultControl(),IsCraftable=function() return true end,GetResultItemLink=function() return "|H1:item:703|hglyph|h" end}
+    ZO_GamepadAlchemy.UpdateTooltip(alchemy)
+    ZO_GamepadEnchanting.UpdateTooltip(enchanting)
+    check(#shown == 4 and shown[3].tip == alchemy.tooltip.tip and shown[4].tip == enchanting.resultTooltip.tip,
+        "alchemy/enchanting hook used a keyboard class or arbitrary tooltip pool")
+    b:_hookCraftingTooltips()
+    check(hookCounts[ZO_GamepadSmithingCreation].SetupResultTooltip == 1,"crafting class hooked twice")
+    print("PASS gamepad hook contracts")
+end
+
+-- 10. Late-UI retries are coalesced and bounded; disabled overlays cannot render.
+do
+    local b = fresh()
+    local queue = {}
+    b._hookTooltipPrice = function() return false end
+    b._hookCraftingTooltips = function() return false end
+    b._hookTradingHouseTooltip = function() return false end
+    zo_callLater = function(fn,delay) check(delay == 2500,"wrong hook retry delay");queue[#queue+1]=fn end
+    b:_scheduleTooltipPriceHookRetry()
+    b:_scheduleTooltipPriceHookRetry()
+    check(#queue == 1,"duplicate hook retry scheduled")
+    local attempts = 0
+    while #queue > 0 do
+        attempts=attempts+1
+        check(attempts <= 6,"unbounded hook retry")
+        table.remove(queue,1)()
+    end
+    check(attempts == 6 and not b._tooltipHookRetryScheduled,"hook retry cap/state incorrect")
+    b.enabled = false
+    b._ensureOverlayWindow = function() error("disabled overlay tried to create/render a window") end
+    b:_showOverlayLines({"disabled"},"bag",{})
+    check(b._overlayTooltipControl == nil,"disabled overlay changed target")
+    print("PASS bounded UI readiness")
+end
+print("PASS all 10 regression groups (" .. checks .. " assertions)")

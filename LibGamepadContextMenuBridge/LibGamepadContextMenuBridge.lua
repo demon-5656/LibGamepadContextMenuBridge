@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 152
-local ADDON_VERSION = "1.5.2"
+local MINOR = 153
+local ADDON_VERSION = "1.5.3"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -15,13 +15,8 @@ bridge.minor = MINOR
 bridge.enabled = true
 bridge.debug = bridge.debug or false
 bridge._initialized = false
-bridge._registerWrapped = false
 bridge._discoverHooked = false
 bridge._refreshHooked = false
-bridge._contextCallbacks = bridge._contextCallbacks or {}
-bridge._callbackKeys = bridge._callbackKeys or {}
-bridge._submenuDialogRegistered = bridge._submenuDialogRegistered or false
-bridge._submenuDialogName = bridge._submenuDialogName or (MAJOR .. "_SubmenuDialog")
 bridge._settingsPanelRegistered = bridge._settingsPanelRegistered or false
 bridge._slashCommandsRegistered = bridge._slashCommandsRegistered or false
 bridge._tooltipPriceHooked = bridge._tooltipPriceHooked or false
@@ -54,7 +49,6 @@ local DEFAULTS = {
     showVendorPriceInTooltip = true,
 }
 
-local unpackArgs = unpack or table.unpack
 
 local function TrimString(value)
     if type(value) ~= "string" then
@@ -64,13 +58,7 @@ local function TrimString(value)
 end
 
 local function GetDebugTimestamp()
-    if type(GetTimeStamp) == "function" then
-        local ok, ts = pcall(GetTimeStamp)
-        if ok and ts then
-            return tostring(ts)
-        end
-    end
-    return tostring(math.floor((GetFrameTimeMilliseconds and GetFrameTimeMilliseconds() or 0) / 1000))
+    return tostring(GetTimeStamp())
 end
 
 function bridge:_addDebugHistory(message)
@@ -120,7 +108,7 @@ function bridge:_debugMessage(message, verboseOnly)
         self:_addDebugHistory(formatted)
     end
 
-    if (not self.savedVars or self.savedVars.debugToChat ~= false) and type(d) == "function" then
+    if not self.savedVars or self.savedVars.debugToChat ~= false then
         d(formatted)
     end
 end
@@ -133,335 +121,23 @@ local function LogTrace(message)
     bridge:_debugMessage(message, true)
 end
 
-local function SafeCallCallback(callback)
-    if type(callback) ~= "function" then
-        return
-    end
-
+local function RunExternalAction(callback)
+    -- External action callbacks may fail after side effects; never retry them.
     local ok, err = pcall(callback)
     if not ok then
         LogDebug("Menu callback failed: " .. tostring(err))
     end
 end
 
-local function SafeCallCallbackWithContext(callback, contextControl)
-    -- Ordinary menu actions use function(); never replay after an error.
-    SafeCallCallback(callback)
-end
-
 local function EvaluateValue(value, ...)
-    if type(value) ~= "function" then
-        return value
+    if type(value) == "function" then
+        return value(...)
     end
-
-    local ok, result = pcall(value, ...)
-    if ok then
-        return result
-    end
-
-    ok, result = pcall(value)
-    if ok then
-        return result
-    end
-
-    return nil
-end
-
-local function SafeGetString(stringId, fallback)
-    if type(GetString) == "function" and stringId ~= nil then
-        local ok, value = pcall(GetString, stringId)
-        if ok and type(value) == "string" and value ~= "" then
-            return value
-        end
-    end
-
-    return fallback or ""
-end
-
-local function SafeGetTargetData(entryList)
-    if not entryList or type(entryList.GetTargetData) ~= "function" then
-        return nil
-    end
-
-    local ok, data = pcall(entryList.GetTargetData, entryList)
-    if ok then
-        return data
-    end
-
-    ok, data = pcall(entryList.GetTargetData)
-    if ok then
-        return data
-    end
-
-    return nil
-end
-
-local function SafeGetTargetControl(entryList)
-    if not entryList then
-        return nil
-    end
-
-    if type(entryList.GetTargetControl) == "function" then
-        local ok, control = pcall(entryList.GetTargetControl, entryList)
-        if ok and control then
-            return control
-        end
-
-        ok, control = pcall(entryList.GetTargetControl)
-        if ok and control then
-            return control
-        end
-    end
-
-    if type(entryList.GetSelectedControl) == "function" then
-        local ok, control = pcall(entryList.GetSelectedControl, entryList)
-        if ok and control then
-            return control
-        end
-
-        ok, control = pcall(entryList.GetSelectedControl)
-        if ok and control then
-            return control
-        end
-    end
-
-    return nil
+    return value
 end
 
 local function IsValidItemLink(link)
     return type(link) == "string" and link:find("|H") ~= nil
-end
-
-function bridge:_extractItemLinkFromData(data)
-    if type(data) ~= "table" then
-        return nil
-    end
-
-    local directKeys = {
-        "itemLink",
-        "resultItemLink",
-        "previewItemLink",
-        "recipeResultItemLink",
-        "furnishingItemLink",
-        "craftedItemLink",
-        "link",
-    }
-
-    for i = 1, #directKeys do
-        local value = data[directKeys[i]]
-        if IsValidItemLink(value) then
-            return value
-        end
-    end
-
-    local nestedKeys = {
-        "itemData",
-        "resultData",
-        "recipeData",
-        "selectedData",
-        "entryData",
-        "data",
-        "recipe",
-    }
-
-    for i = 1, #nestedKeys do
-        local nested = data[nestedKeys[i]]
-        if type(nested) == "table" then
-            local nestedLink = self:_extractItemLinkFromData(nested)
-            if IsValidItemLink(nestedLink) then
-                return nestedLink
-            end
-        end
-    end
-
-    if type(GetRecipeResultItemLink) == "function" then
-        local recipeListIndex = data.recipeListIndex or data.selectedRecipeListIndex or data.listIndex
-        local recipeIndex = data.recipeIndex or data.selectedRecipeIndex or data.index
-        if recipeListIndex ~= nil and recipeIndex ~= nil then
-            local ok, recipeLink = pcall(GetRecipeResultItemLink, recipeListIndex, recipeIndex)
-            if ok and IsValidItemLink(recipeLink) then
-                return recipeLink
-            end
-        end
-    end
-
-    if type(GetSmithingPatternResultLink) == "function" then
-        local patternIndex = data.patternIndex
-        local materialIndex = data.materialIndex
-        local materialQuantity = data.materialQuantity
-        local styleIndex = data.styleIndex
-        local traitIndex = data.traitIndex
-        if patternIndex ~= nil and materialIndex ~= nil then
-            local ok, patternLink = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            if ok and IsValidItemLink(patternLink) then
-                return patternLink
-            end
-        end
-    end
-
-    return nil
-end
-
-function bridge:_resolveCurrentFurnishingLink(sourceObject)
-    if IsValidItemLink(self._pendingCraftingLink) then
-        return self._pendingCraftingLink
-    end
-
-    local methodNames = {
-        "GetCurrentResultItemLink",
-        "GetResultItemLink",
-        "GetCurrentResultLink",
-        "GetCurrentFurnishingResultItemLink",
-        "GetFurnishingResultItemLink",
-        "GetCurrentFurnishingLink",
-        "GetSelectedRecipeResultItemLink",
-        "GetSelectedFurnishingRecipeResultItemLink",
-    }
-
-    local methodTargets = {
-        sourceObject,
-        sourceObject and sourceObject.resultTooltip,
-        ZO_GamepadSmithingCreation,
-        ZO_SmithingCreation,
-        SMITHING,
-        GAMEPAD_SMITHING_CREATION,
-    }
-
-    for targetIndex = 1, #methodTargets do
-        local target = methodTargets[targetIndex]
-        if type(target) == "table" then
-            for methodIndex = 1, #methodNames do
-                local methodName = methodNames[methodIndex]
-                local method = target[methodName]
-                if type(method) == "function" then
-                    local ok, link = pcall(method, target)
-                    if ok and IsValidItemLink(link) then
-                        return link
-                    end
-
-                    ok, link = pcall(method)
-                    if ok and IsValidItemLink(link) then
-                        return link
-                    end
-                end
-            end
-        end
-    end
-
-    local listTargets = {
-        sourceObject and sourceObject.itemList,
-        sourceObject and sourceObject.list,
-        sourceObject and sourceObject.parametricList,
-        sourceObject and sourceObject.recipeList,
-        sourceObject and sourceObject.patternList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.itemList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.list,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.parametricList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.recipeList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.patternList,
-    }
-
-    for i = 1, #listTargets do
-        local selectedData = SafeGetTargetData(listTargets[i])
-        local link = self:_extractItemLinkFromData(selectedData)
-        if IsValidItemLink(link) then
-            return link
-        end
-    end
-
-    return nil
-end
-
-local function MergeCraftContextField(dst, src, key)
-    if dst[key] == nil and src[key] ~= nil then
-        dst[key] = src[key]
-    end
-end
-
-function bridge:_extractCraftContextFromData(data)
-    if type(data) ~= "table" then
-        return nil
-    end
-
-    local context = {
-        selectedData = data,
-    }
-
-    local recipeData = type(data.recipeData) == "table" and data.recipeData or nil
-
-    context.recipeListIndex = data.recipeListIndex
-        or data.selectedRecipeListIndex
-        or (recipeData and recipeData.recipeListIndex)
-        or data.listIndex
-    context.recipeIndex = data.recipeIndex
-        or data.selectedRecipeIndex
-        or (recipeData and recipeData.recipeIndex)
-        or data.index
-
-    context.patternIndex = data.patternIndex
-    context.materialIndex = data.materialIndex
-    context.materialQuantity = data.materialQuantity
-    context.styleIndex = data.styleIndex
-    context.traitIndex = data.traitIndex
-
-    return context
-end
-
-function bridge:_resolveCurrentFurnishingCraftContext(sourceObject, baseContext)
-    local context = {}
-
-    if type(baseContext) == "table" then
-        for key, value in pairs(baseContext) do
-            context[key] = value
-        end
-    end
-
-    local listTargets = {
-        sourceObject and sourceObject.itemList,
-        sourceObject and sourceObject.list,
-        sourceObject and sourceObject.parametricList,
-        sourceObject and sourceObject.recipeList,
-        sourceObject and sourceObject.patternList,
-        sourceObject and sourceObject.categoryList and sourceObject.categoryList.list,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.itemList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.list,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.parametricList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.recipeList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.patternList,
-        ZO_GamepadSmithingCreation and ZO_GamepadSmithingCreation.categoryList and ZO_GamepadSmithingCreation.categoryList.list,
-    }
-
-    for i = 1, #listTargets do
-        local selectedData = SafeGetTargetData(listTargets[i])
-        if type(selectedData) == "table" then
-            local extracted = self:_extractCraftContextFromData(selectedData)
-            if type(extracted) == "table" then
-                MergeCraftContextField(context, extracted, "recipeListIndex")
-                MergeCraftContextField(context, extracted, "recipeIndex")
-                MergeCraftContextField(context, extracted, "patternIndex")
-                MergeCraftContextField(context, extracted, "materialIndex")
-                MergeCraftContextField(context, extracted, "materialQuantity")
-                MergeCraftContextField(context, extracted, "styleIndex")
-                MergeCraftContextField(context, extracted, "traitIndex")
-                if type(extracted.selectedData) == "table" then
-                    context.selectedData = extracted.selectedData
-                end
-            end
-        end
-    end
-
-    if context.recipeListIndex == nil and type(sourceObject) == "table" and type(sourceObject.GetRecipeData) == "function" then
-        local ok, recipeData = pcall(sourceObject.GetRecipeData, sourceObject)
-        if ok and type(recipeData) == "table" then
-            context.recipeListIndex = recipeData.recipeListIndex or context.recipeListIndex
-            context.recipeIndex = recipeData.recipeIndex or context.recipeIndex
-            if type(context.selectedData) ~= "table" then
-                context.selectedData = recipeData
-            end
-        end
-    end
-
-    return context
 end
 
 function bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
@@ -472,19 +148,6 @@ function bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity,
         styleIndex = styleIndex,
         traitIndex = traitIndex,
     }
-end
-
-function bridge:_resolveSmithingPatternResultLink(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-    if type(GetSmithingPatternResultLink) ~= "function" then
-        return nil
-    end
-
-    local ok, link = pcall(GetSmithingPatternResultLink, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-    if ok and IsValidItemLink(link) then
-        return link
-    end
-
-    return nil
 end
 
 function bridge:_makeRecipeCraftContext(recipeListIndex, recipeIndex, selectedData)
@@ -499,57 +162,20 @@ function bridge:_makeRecipeCraftContext(recipeListIndex, recipeIndex, selectedDa
 end
 
 local function ResolveCategory(lcm, category)
-    local early = lcm and tonumber(lcm.CATEGORY_EARLY) or nil
-    local late = lcm and tonumber(lcm.CATEGORY_LATE) or nil
-
-    category = tonumber(category) or late or early
-
-    if category == nil then
-        return nil
-    end
-
-    if early == nil or late == nil then
-        return category
-    end
-
-    if type(zo_clamp) == "function" then
-        return zo_clamp(category, early, late)
-    end
-
-    if category < early then
-        return early
-    end
-
-    if category > late then
-        return late
-    end
-
-    return category
+    return zo_clamp(tonumber(category) or lcm.CATEGORY_LATE, lcm.CATEGORY_EARLY, lcm.CATEGORY_LATE)
 end
 
 local function ResolveLabel(value, contextControl)
     value = EvaluateValue(value, ZO_Menu, contextControl)
-
     if value == nil then
         return nil
     end
-
-    if type(value) == "number" and type(GetString) == "function" then
-        local ok, localized = pcall(GetString, value)
-        if ok and type(localized) == "string" and localized ~= "" then
-            return localized
-        end
-    end
-
-    if type(value) ~= "string" then
+    if type(value) == "number" then
+        value = GetString(value)
+    elseif type(value) ~= "string" then
         value = tostring(value)
     end
-
-    if value == "" then
-        return nil
-    end
-
-    return value
+    return value ~= "" and value or nil
 end
 
 local function IsDividerLabel(label)
@@ -568,412 +194,102 @@ local function IsDividerLabel(label)
     return false
 end
 
-local function BuildCallbackKey(func, category, args)
-    local key = tostring(func) .. "|" .. tostring(category)
-    if args and #args > 0 then
-        for i = 1, #args do
-            key = key .. "|" .. tostring(args[i])
-        end
-    end
-    return key
-end
-
-local function ReadActionName(entry)
-    if type(entry) ~= "table" then
-        return nil
-    end
-
-    local actionName = entry.name or entry.actionName or entry[1]
-
-    if type(actionName) == "number" and type(GetString) == "function" then
-        local ok, localized = pcall(GetString, actionName)
-        if ok and type(localized) == "string" then
-            actionName = localized
-        end
-    end
-
-    if type(actionName) ~= "string" or actionName == "" then
-        return nil
-    end
-
-    return actionName
-end
-
 local function CollectExistingActionNames(slotActions)
     local names = {}
-
-    local candidates = {
-        slotActions and slotActions.m_slotActions,
-        slotActions and slotActions.m_actionList,
-        slotActions and slotActions.actionList,
-        slotActions and slotActions.m_actions,
-    }
-
-    for i = 1, #candidates do
-        local list = candidates[i]
-        if type(list) == "table" then
-            for index = 1, #list do
-                local name = ReadActionName(list[index])
-                if name then
-                    names[name] = true
-                end
-            end
-        end
+    for _, action in ipairs(slotActions.m_slotActions) do
+        names[action[1]] = true
     end
-
     return names
 end
 
 local function StampActionLabel(slotActions, label, callback)
-    if type(slotActions) ~= "table" or type(label) ~= "string" or label == "" or type(callback) ~= "function" then
-        return
-    end
-
-    local candidates = {
-        slotActions.m_slotActions,
-        slotActions.m_actionList,
-        slotActions.actionList,
-        slotActions.m_actions,
-    }
-
-    for i = 1, #candidates do
-        local list = candidates[i]
-        if type(list) == "table" then
-            for index = #list, 1, -1 do
-                local actionEntry = list[index]
-                if type(actionEntry) == "table" then
-                    local entryCallback = actionEntry.callback or actionEntry.actionCallback or actionEntry[2]
-                    if entryCallback == callback then
-                        actionEntry.name = actionEntry.name or label
-                        actionEntry.actionName = actionEntry.actionName or label
-                        if actionEntry[1] == nil then
-                            actionEntry[1] = label
-                        end
-                        return
-                    end
-                end
-            end
-        end
-    end
+    -- ESO stores action name/callback at indices 1/2. Named aliases support
+    -- third-party dialogs that consume the same action table.
+    local entry = slotActions.m_slotActions[#slotActions.m_slotActions]
+    entry.name = label
+    entry.actionName = label
 end
 
 function bridge:_ensureActionStringId(label)
-    if type(label) ~= "string" or label == "" then
-        return label
+    local id = self._stringIdByLabel[label]
+    if not id then
+        local name = string.format("SI_LGCMB_ACTION_%d", self._nextStringIdIndex)
+        self._nextStringIdIndex = self._nextStringIdIndex + 1
+        ZO_CreateStringId(name, label)
+        id = _G[name]
+        self._stringIdByLabel[label] = id
     end
-
-    local existingId = self._stringIdByLabel[label]
-    if existingId ~= nil then
-        return existingId
-    end
-
-    if type(ZO_CreateStringId) ~= "function" then
-        return label
-    end
-
-    local idName = string.format("SI_LGCMB_ACTION_%d", tonumber(self._nextStringIdIndex or 1))
-    self._nextStringIdIndex = (self._nextStringIdIndex or 1) + 1
-    pcall(ZO_CreateStringId, idName, label)
-
-    local createdId = _G[idName]
-    if createdId == nil then
-        createdId = label
-    end
-
-    self._stringIdByLabel[label] = createdId
-    return createdId
+    return id
 end
 
 function bridge:_readContextMenuRegistry()
-    local lcm = LibCustomMenu
-    if type(lcm) ~= "table" then
-        return nil, "LibCustomMenu missing"
-    end
-
-    local registry = lcm.contextMenuRegistry
-    if type(registry) ~= "table" then
-        return nil, "contextMenuRegistry missing"
-    end
-
-    local callbackRegistry = registry.callbackRegistry or registry.m_callbackRegistry
-    if type(callbackRegistry) ~= "table" then
-        return nil, "callback registry missing"
-    end
-
-    return callbackRegistry, nil
+    return LibCustomMenu.contextMenuRegistry
 end
 
 function bridge:_summarizeContextRegistry()
-    local callbackRegistry, err = self:_readContextMenuRegistry()
-    if not callbackRegistry then
-        return err or "unavailable", 0
-    end
-
-    local early = LibCustomMenu and tonumber(LibCustomMenu.CATEGORY_EARLY) or nil
-    local late = LibCustomMenu and tonumber(LibCustomMenu.CATEGORY_LATE) or nil
-    if early == nil or late == nil then
-        return "category bounds unavailable", 0
-    end
-    local parts = {}
-    local total = 0
-    for category = early, late do
-        local handlers = callbackRegistry[category]
-        local count = type(handlers) == "table" and #handlers or 0
-        total = total + count
-        parts[#parts + 1] = string.format("%d=%d", category, count)
-    end
-
-    return table.concat(parts, ", "), total
-end
-
-function bridge:_invokeRawRegistryHandlers(lcm, inventorySlot, slotActions)
-    local callbackRegistry, err = self:_readContextMenuRegistry()
-    if not callbackRegistry then
-        LogTrace("Raw registry fallback unavailable: " .. tostring(err))
-        return 0
-    end
-
-    local early = tonumber(lcm.CATEGORY_EARLY)
-    local late = tonumber(lcm.CATEGORY_LATE)
-    if early == nil or late == nil then
-        return 0
-    end
-    local invoked = 0
-
-    for category = early, late do
-        local handlers = callbackRegistry[category]
-        if type(handlers) == "table" then
-            for i = 1, #handlers do
-                local entry = handlers[i]
-                local callback = nil
-                local args = nil
-
-                if type(entry) == "function" then
-                    callback = entry
-                elseif type(entry) == "table" then
-                    callback = entry.callback or entry.func or entry[1]
-                    if type(entry.args) == "table" then
-                        args = entry.args
-                    end
-                end
-
-                if type(callback) == "function" then
-                    local ok, callbackErr
-                    if args and #args > 0 then
-                        local callArgs = {}
-                        for argIndex = 1, #args do
-                            callArgs[#callArgs + 1] = args[argIndex]
-                        end
-                        callArgs[#callArgs + 1] = inventorySlot
-                        callArgs[#callArgs + 1] = slotActions
-                        ok, callbackErr = pcall(callback, unpackArgs(callArgs))
-                    else
-                        ok, callbackErr = pcall(callback, inventorySlot, slotActions)
-                    end
-
-                    invoked = invoked + 1
-                    if not ok then
-                        LogTrace(string.format("Raw handler error in category %s: %s", tostring(category), tostring(callbackErr)))
-                    end
-                end
+    local registry = self:_readContextMenuRegistry().callbackRegistry
+    local chunks, total = {}, 0
+    for category = LibCustomMenu.CATEGORY_EARLY, LibCustomMenu.CATEGORY_LATE do
+        local count = 0
+        for _, entry in ipairs(registry and registry[category] or {}) do
+            if not entry[3] then
+                count = count + 1
             end
         end
+        total = total + count
+        chunks[#chunks + 1] = string.format("%d:%d", category, count)
     end
-
-    return invoked
+    return table.concat(chunks, ","), total
 end
 
 function bridge:_resolveNormalizedSlotType(inventorySlot, slotType)
     if slotType == SLOT_TYPE_ITEM or slotType == SLOT_TYPE_BANK_ITEM or slotType == SLOT_TYPE_GUILD_BANK_ITEM then
         return slotType
     end
-
-    if type(ZO_Inventory_GetBagAndIndex) ~= "function" then
-        return slotType
-    end
-
     local bagId, slotIndex = ZO_Inventory_GetBagAndIndex(inventorySlot)
     if bagId == nil or slotIndex == nil then
         return slotType
     end
-
-    if type(BAG_BACKPACK) == "number" and bagId == BAG_BACKPACK and SLOT_TYPE_ITEM ~= nil then
+    if bagId == BAG_BACKPACK then
         return SLOT_TYPE_ITEM
-    end
-
-    if type(BAG_BANK) == "number" and bagId == BAG_BANK and SLOT_TYPE_BANK_ITEM ~= nil then
+    elseif bagId == BAG_BANK or bagId == BAG_SUBSCRIBER_BANK then
         return SLOT_TYPE_BANK_ITEM
-    end
-
-    if type(BAG_SUBSCRIBER_BANK) == "number" and bagId == BAG_SUBSCRIBER_BANK and SLOT_TYPE_BANK_ITEM ~= nil then
-        return SLOT_TYPE_BANK_ITEM
-    end
-
-    if type(BAG_GUILDBANK) == "number" and bagId == BAG_GUILDBANK and SLOT_TYPE_GUILD_BANK_ITEM ~= nil then
+    elseif bagId == BAG_GUILDBANK then
         return SLOT_TYPE_GUILD_BANK_ITEM
     end
-
     return slotType
 end
 
 function bridge:_resolveBagAndSlot(inventorySlot)
-    if type(inventorySlot) == "table" then
-        local bagId = inventorySlot.bagId or inventorySlot.bag
-        local slotIndex = inventorySlot.slotIndex or inventorySlot.slot
-        if bagId ~= nil and slotIndex ~= nil then
-            return bagId, slotIndex
-        end
-    end
-
-    if type(ZO_Inventory_GetBagAndIndex) ~= "function" then
+    if not inventorySlot then
         return nil, nil
     end
-
-    local bagId, slotIndex = ZO_Inventory_GetBagAndIndex(inventorySlot)
-    if bagId == nil or slotIndex == nil then
-        return nil, nil
-    end
-
-    return bagId, slotIndex
+    return ZO_Inventory_GetBagAndIndex(inventorySlot)
 end
 
 function bridge:_buildNativeJunkAction(inventorySlot)
-    if type(SetItemIsJunk) ~= "function" or type(IsItemJunk) ~= "function" then
-        return nil
-    end
-
     local bagId, slotIndex = self:_resolveBagAndSlot(inventorySlot)
-    if bagId == nil or slotIndex == nil then
+    if bagId == nil or slotIndex == nil or bagId == BAG_VIRTUAL then
         return nil
     end
-
-    if type(BAG_VIRTUAL) == "number" and bagId == BAG_VIRTUAL then
+    local isJunk = IsItemJunk(bagId, slotIndex)
+    if not isJunk and (IsItemPlayerLocked(bagId, slotIndex) or not CanItemBeMarkedAsJunk(bagId, slotIndex)) then
         return nil
     end
-
-    local isJunk = IsItemJunk(bagId, slotIndex) == true
-    if not isJunk then
-        if type(IsItemPlayerLocked) == "function" and IsItemPlayerLocked(bagId, slotIndex) then
-            return nil
-        end
-
-        if type(CanItemBeMarkedAsJunk) ~= "function" or not CanItemBeMarkedAsJunk(bagId, slotIndex) then
-            return nil
-        end
-    end
-
-    local labelStringId = isJunk and SI_ITEM_ACTION_UNMARK_AS_JUNK or SI_ITEM_ACTION_MARK_AS_JUNK
-    local fallbackLabel = isJunk and "Unmark as Junk" or "Mark as Junk"
-    local label = SafeGetString(labelStringId, fallbackLabel)
-    if type(label) ~= "string" or label == "" then
-        return nil
-    end
-
     return {
-        label = label,
+        label = GetString(isJunk and SI_ITEM_ACTION_UNMARK_AS_JUNK or SI_ITEM_ACTION_MARK_AS_JUNK),
         callback = function()
             SetItemIsJunk(bagId, slotIndex, not isJunk)
         end,
     }
 end
 
-function bridge:_rememberContextCallback(func, category, args)
-    if type(func) ~= "function" then
-        return
+function bridge:RegisterContextMenu(callback, category, ...)
+    if type(callback) ~= "function" then
+        return false
     end
-
-    local key = BuildCallbackKey(func, category, args)
-    if self._callbackKeys[key] then
-        return
-    end
-
-    self._callbackKeys[key] = true
-
-    local callbacks = self._contextCallbacks[category]
-    if not callbacks then
-        callbacks = {}
-        self._contextCallbacks[category] = callbacks
-    end
-
-    callbacks[#callbacks + 1] = {
-        func = func,
-        args = args,
-    }
-
-    LogTrace(string.format("Registered callback in category %s (count=%d)", tostring(category), #callbacks))
-end
-
-function bridge:_importExistingCallbacks(lcm)
-    local registry = lcm and lcm.contextMenuRegistry
-    if type(registry) ~= "table" then
-        return
-    end
-
-    local callbackRegistry = registry.callbackRegistry or registry.m_callbackRegistry
-    if type(callbackRegistry) ~= "table" then
-        return
-    end
-
-    for category, handlers in pairs(callbackRegistry) do
-        local numericCategory = tonumber(category)
-        if numericCategory and type(handlers) == "table" then
-            local resolvedCategory = ResolveCategory(lcm, numericCategory)
-
-            for i = 1, #handlers do
-                local entry = handlers[i]
-                if type(entry) == "table" then
-                    local callback = entry[1] or entry.callback
-                    if type(callback) == "function" then
-                        local args = {}
-                        if entry.args and type(entry.args) == "table" then
-                            for argIndex = 1, #entry.args do
-                                args[#args + 1] = entry.args[argIndex]
-                            end
-                        else
-                            for argIndex = 2, #entry do
-                                args[#args + 1] = entry[argIndex]
-                            end
-                        end
-
-                        self:_rememberContextCallback(callback, resolvedCategory, args)
-                    end
-                end
-            end
-        end
-    end
-end
-
-function bridge:_wrapRegisterContextMenu(lcm)
-    if self._registerWrapped then
-        return
-    end
-
-    if type(lcm) ~= "table" or type(lcm.RegisterContextMenu) ~= "function" then
-        return
-    end
-
-    self._originalRegisterContextMenu = lcm.RegisterContextMenu
-
-    lcm.RegisterContextMenu = function(libSelf, func, category, ...)
-        local callbackArgs = { ... }
-        bridge:_rememberContextCallback(func, ResolveCategory(lcm, category), callbackArgs)
-        return bridge._originalRegisterContextMenu(libSelf, func, category, ...)
-    end
-
-    self._registerWrapped = true
-end
-
-function bridge:RegisterContextMenu(func, category, ...)
-    local lcm = LibCustomMenu
-    if type(lcm) ~= "table" then
-        return
-    end
-
-    if type(lcm.RegisterContextMenu) == "function" then
-        lcm:RegisterContextMenu(func, category, ...)
-    else
-        self:_rememberContextCallback(func, ResolveCategory(lcm, category), { ... })
-    end
+    LibCustomMenu:RegisterContextMenu(callback, ResolveCategory(LibCustomMenu, category), ...)
+    return true
 end
 
 function bridge:SetEnabled(enabled)
@@ -1040,10 +356,6 @@ function bridge:ClearDebugLog()
 end
 
 function bridge:DumpDebugLog(limit)
-    if type(d) ~= "function" then
-        return
-    end
-
     local count = #self._debugLog
     if count == 0 then
         d(string.format("[%s] Debug log is empty", MAJOR))
@@ -1063,13 +375,9 @@ function bridge:DumpDebugLog(limit)
 end
 
 function bridge:DumpRuntimeStatus()
-    if type(d) ~= "function" then
-        return
-    end
-
     local summary, total = self:_summarizeContextRegistry()
     local overlayVisible = false
-    if self._overlayWindow and self._overlayWindow.window and type(self._overlayWindow.window.IsHidden) == "function" then
+    if self._overlayWindow and self._overlayWindow.window then
         overlayVisible = not self._overlayWindow.window:IsHidden()
     end
 
@@ -1117,13 +425,6 @@ function bridge:_initializeSavedVars()
         return
     end
 
-    if type(ZO_SavedVars) ~= "table" or type(ZO_SavedVars.NewAccountWide) ~= "function" then
-        self.enabled = DEFAULTS.enabled
-        self.debug = DEFAULTS.debug
-        self.debugVerbose = DEFAULTS.debugVerbose
-        return
-    end
-
     self.savedVars = ZO_SavedVars:NewAccountWide(SAVED_VARS_NAME, SAVED_VARS_VERSION, nil, DEFAULTS)
     self.enabled = self.savedVars.enabled ~= false
     self.debug = self.savedVars.debug == true
@@ -1160,79 +461,23 @@ function bridge:_shouldShowTemplateCraftingOverlay()
 end
 
 function bridge:_getTtcPriceInfo(itemLink)
-    if type(itemLink) ~= "string" or itemLink == "" then
+    -- TTC is optional; once loaded, use its documented public price provider.
+    if not TamrielTradeCentrePrice or not IsValidItemLink(itemLink) then
         return nil
     end
-
-    local providers = {
-        _G.TamrielTradeCentrePrice,
-        type(TamrielTradeCentre) == "table" and TamrielTradeCentre.Price or nil,
-    }
-
-    for i = 1, #providers do
-        local provider = providers[i]
-        if type(provider) == "table" and type(provider.GetPriceInfo) == "function" then
-            local ok, priceInfo = pcall(provider.GetPriceInfo, provider, itemLink)
-            if ok and type(priceInfo) == "table" then
-                return {
-                    Avg = priceInfo.Avg or priceInfo.A,
-                    Max = priceInfo.Max or priceInfo.X,
-                    Min = priceInfo.Min or priceInfo.N,
-                    EntryCount = priceInfo.EntryCount or priceInfo.EC,
-                    AmountCount = priceInfo.AmountCount or priceInfo.AC,
-                    SuggestedPrice = priceInfo.SuggestedPrice or priceInfo.S,
-                    SaleAvg = priceInfo.SaleAvg or priceInfo.SA,
-                    SaleEntryCount = priceInfo.SaleEntryCount or priceInfo.SE,
-                    SaleAmountCount = priceInfo.SaleAmountCount or priceInfo.SAC,
-                }
-            end
-        end
-    end
-
-    return nil
+    return TamrielTradeCentrePrice:GetPriceInfo(itemLink)
 end
 
 function bridge:_getTtcPriceTableUpdatedText()
-    local providers = {
-        _G.TamrielTradeCentrePrice,
-        type(TamrielTradeCentre) == "table" and TamrielTradeCentre.Price or nil,
-    }
-
-    for i = 1, #providers do
-        local provider = providers[i]
-        if type(provider) == "table" and type(provider.GetPriceTableUpdatedDateString) == "function" then
-            local ok, updatedText = pcall(provider.GetPriceTableUpdatedDateString, provider)
-            if ok and type(updatedText) == "string" and updatedText ~= "" then
-                return updatedText
-            end
-        end
+    if TamrielTradeCentrePrice then
+        return TamrielTradeCentrePrice:GetPriceTableUpdatedDateString()
     end
-
-    return nil
 end
 
 function bridge:_formatTtcCurrency(value)
-    if type(value) ~= "number" then
-        return nil
+    if type(value) == "number" then
+        return ZO_CurrencyControl_FormatCurrency(math.floor(value + 0.5), true)
     end
-
-    value = math.floor(value + 0.5)
-
-    if type(ZO_CurrencyControl_FormatCurrency) == "function" then
-        local ok, formatted = pcall(ZO_CurrencyControl_FormatCurrency, value, true, nil)
-        if ok and type(formatted) == "string" and formatted ~= "" then
-            return formatted
-        end
-    end
-
-    if type(TamrielTradeCentre) == "table" and type(TamrielTradeCentre.FormatNumber) == "function" then
-        local ok, formatted = pcall(TamrielTradeCentre.FormatNumber, TamrielTradeCentre, value, 0)
-        if ok and type(formatted) == "string" and formatted ~= "" then
-            return formatted
-        end
-    end
-
-    return tostring(zo_floor and zo_floor(value) or math.floor(value))
 end
 
 function bridge:_formatTooltipInfoCurrency(value)
@@ -1325,92 +570,36 @@ function bridge:_getCachedTtcTooltipLines(itemLink)
 end
 
 function bridge:_getItemLinkFromBagAndSlot(bagId, slotIndex)
-    if type(GetItemLink) ~= "function" or bagId == nil or slotIndex == nil then
-        return nil
+    if bagId ~= nil and slotIndex ~= nil then
+        local link = GetItemLink(bagId, slotIndex, LINK_STYLE_DEFAULT)
+        return link ~= "" and link or nil
     end
-
-    local ok, itemLink = pcall(GetItemLink, bagId, slotIndex)
-    if not ok or type(itemLink) ~= "string" or itemLink == "" then
-        return nil
-    end
-
-    return itemLink
 end
 
 function bridge:_getVendorPriceText(bagId, slotIndex)
-    if not self:_shouldShowVendorPriceInTooltip() then
-        return nil
-    end
-
-    local sellPrice = nil
-    if type(GetItemSellValueWithBonuses) == "function" then
-        local ok, value = pcall(GetItemSellValueWithBonuses, bagId, slotIndex)
-        if ok and type(value) == "number" then
-            sellPrice = value
+    if self:_shouldShowVendorPriceInTooltip() then
+        local value = GetItemSellValueWithBonuses(bagId, slotIndex)
+        if value > 0 then
+            return "Vendor: " .. self:_formatTooltipInfoCurrency(value)
         end
     end
-
-    if sellPrice == nil and type(GetItemSellValue) == "function" then
-        local ok, value = pcall(GetItemSellValue, bagId, slotIndex)
-        if ok and type(value) == "number" then
-            sellPrice = value
-        end
-    end
-
-    if type(sellPrice) ~= "number" or sellPrice <= 0 then
-        return nil
-    end
-
-    local priceText = self:_formatTooltipInfoCurrency(sellPrice)
-    if type(priceText) ~= "string" or priceText == "" then
-        return nil
-    end
-
-    return "Vendor: " .. priceText
 end
 
 function bridge:_getJunkStatusText(bagId, slotIndex)
-    if not self:_shouldShowJunkStatusInTooltip() then
-        return nil
-    end
-
-    if type(IsItemJunk) ~= "function" then
-        return nil
-    end
-
-    local ok, isJunk = pcall(IsItemJunk, bagId, slotIndex)
-    if ok and isJunk == true then
-        return "Junk: Yes"
-    end
-
-    if type(CanItemBeMarkedAsJunk) == "function" then
-        local canMarkOk, canMark = pcall(CanItemBeMarkedAsJunk, bagId, slotIndex)
-        if canMarkOk and canMark == true then
+    if self:_shouldShowJunkStatusInTooltip() then
+        if IsItemJunk(bagId, slotIndex) then
+            return "Junk: Yes"
+        elseif CanItemBeMarkedAsJunk(bagId, slotIndex) then
             return "Junk: No"
         end
     end
-
-    return nil
 end
 
 function bridge:_isBoundItem(bagId, slotIndex, itemLink)
-    local isBound = false
-
-    if bagId ~= nil and slotIndex ~= nil and type(IsItemBound) == "function" then
-        local ok, value = pcall(IsItemBound, bagId, slotIndex)
-        if ok and value == true then
-            isBound = true
-        end
+    if bagId ~= nil and slotIndex ~= nil then
+        return IsItemBound(bagId, slotIndex)
     end
-
-    if not isBound and type(IsItemLinkBound) == "function" and type(itemLink) == "string" then
-        local ok, value = pcall(IsItemLinkBound, itemLink)
-        if ok and value == true then
-            isBound = true
-        end
-    end
-
-    return isBound
+    return IsValidItemLink(itemLink) and IsItemLinkBound(itemLink) or false
 end
 
 function bridge:_buildTooltipInfoLines(bagId, slotIndex)
@@ -1420,13 +609,7 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
         return lines
     end
 
-    local stackCount = nil
-    if type(GetSlotStackSize) == "function" then
-        local ok, value = pcall(GetSlotStackSize, bagId, slotIndex)
-        if ok and type(value) == "number" and value > 0 then
-            stackCount = value
-        end
-    end
+    local stackCount = GetSlotStackSize(bagId, slotIndex)
     if itemLink then
         local linkLines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false)
         for i = 1, #linkLines do
@@ -1515,9 +698,9 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
         end
     end
 
-    if includeVendor and self:_shouldShowVendorPriceInTooltip() and type(GetItemLinkValue) == "function" then
-        local ok, sellPrice = pcall(GetItemLinkValue, itemLink)
-        if ok and type(sellPrice) == "number" and sellPrice > 0 then
+    if includeVendor and self:_shouldShowVendorPriceInTooltip() then
+        local sellPrice = GetItemLinkValue(itemLink, false)
+        if sellPrice > 0 then
             local priceText = self:_formatTooltipInfoCurrency(sellPrice)
             if type(priceText) == "string" and priceText ~= "" then
                 lines[#lines + 1] = "Vendor: " .. priceText
@@ -1554,31 +737,9 @@ function bridge:_getItemLinkQualityHex(itemLink)
     if not IsValidItemLink(itemLink) then
         return "B8B29A"
     end
-
-    local quality = nil
-    if type(GetItemLinkDisplayQuality) == "function" then
-        local ok, q = pcall(GetItemLinkDisplayQuality, itemLink)
-        if ok and type(q) == "number" then
-            quality = q
-        end
-    end
-    if quality == nil and type(GetItemLinkQuality) == "function" then
-        local ok, q = pcall(GetItemLinkQuality, itemLink)
-        if ok and type(q) == "number" then
-            quality = q
-        end
-    end
-
-    if quality ~= nil and type(GetInterfaceColor) == "function"
-        and type(INTERFACE_COLOR_TYPE_ITEM_QUALITY_COLORS) == "number"
-    then
-        local ok, r, g, b = pcall(GetInterfaceColor, INTERFACE_COLOR_TYPE_ITEM_QUALITY_COLORS, quality)
-        if ok and type(r) == "number" and type(g) == "number" and type(b) == "number" then
-            return RgbToHex(r, g, b)
-        end
-    end
-
-    return "B8B29A"
+    local quality = GetItemLinkDisplayQuality(itemLink)
+    local r, g, b = GetInterfaceColor(INTERFACE_COLOR_TYPE_ITEM_QUALITY_COLORS, quality)
+    return string.format("%02X%02X%02X", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
 end
 
 function bridge:_collectRecipeIngredients(recipeListIndex, recipeIndex)
@@ -1587,156 +748,18 @@ function bridge:_collectRecipeIngredients(recipeListIndex, recipeIndex)
         return ingredients
     end
 
-    local function callGlobal(globalName, ...)
-        local fn = _G[globalName]
-        if type(fn) ~= "function" then
-            return false
-        end
-        return pcall(fn, ...)
-    end
-
-    local function callAny(globalNames, argSets)
-        for i = 1, #globalNames do
-            local globalName = globalNames[i]
-            for j = 1, #argSets do
-                local args = argSets[j]
-                local ok, a, b, c, d, e, f = callGlobal(globalName, unpack(args))
-                if ok then
-                    return true, a, b, c, d, e, f, globalName, j
-                end
-            end
-        end
-        return false
-    end
-
-    local ingredientCount = 0
-
-    if type(GetRecipeNumIngredients) == "function" then
-        local okCount, value = pcall(GetRecipeNumIngredients, recipeListIndex, recipeIndex)
-        if okCount and type(value) == "number" then
-            ingredientCount = value
-        else
-            LogTrace("craft.recipe: GetRecipeNumIngredients failed okCount=" .. tostring(okCount)
-                .. " ingredientCount type=" .. type(value) .. " value=" .. tostring(value))
-        end
-    else
-        LogTrace("craft.recipe: GetRecipeNumIngredients not available")
-    end
-
-    if ingredientCount <= 0 then
-        local okCurrent, currentCount = callGlobal("GetCurrentRecipeIngredientCount")
-        if okCurrent and type(currentCount) == "number" and currentCount > 0 then
-            ingredientCount = currentCount
+    local _, _, ingredientCount = GetRecipeInfo(recipeListIndex, recipeIndex)
+    for i = 1, ingredientCount do
+        local link = GetRecipeIngredientItemLink(recipeListIndex, recipeIndex, i)
+        local quantity = GetRecipeIngredientRequiredQuantity(recipeListIndex, recipeIndex, i)
+        if quantity and quantity > 0 then
+            ingredients[#ingredients + 1] = {
+                itemLink = IsValidItemLink(link) and link or nil,
+                quantity = quantity,
+                name = IsValidItemLink(link) and GetItemLinkName(link) or nil,
+            }
         end
     end
-
-    -- Furnishing recipe UI sometimes reports 0 here even when ingredients exist.
-    local scanCount = ingredientCount > 0 and ingredientCount or 24
-
-    for i = 1, scanCount do
-        local link = nil
-        if type(GetRecipeIngredientItemLink) == "function" then
-            local ok, value = pcall(GetRecipeIngredientItemLink, recipeListIndex, recipeIndex, i)
-            if ok and IsValidItemLink(value) then
-                link = value
-            elseif not ok then
-                LogTrace("craft.recipe: slot " .. i .. " GetRecipeIngredientItemLink error")
-            end
-        end
-
-        if not IsValidItemLink(link) then
-            local okLink, a, b, c, d, e, f, fromName = callAny(
-                {
-                    "GetCurrentRecipeIngredientItemLink",
-                    "GetCurrentRecipeIngredientLink",
-                },
-                {
-                    { i },
-                    { recipeListIndex, recipeIndex, i },
-                }
-            )
-            if okLink then
-                local fallbackLink = nil
-                if IsValidItemLink(a) then
-                    fallbackLink = a
-                elseif IsValidItemLink(b) then
-                    fallbackLink = b
-                elseif IsValidItemLink(c) then
-                    fallbackLink = c
-                elseif IsValidItemLink(d) then
-                    fallbackLink = d
-                elseif IsValidItemLink(e) then
-                    fallbackLink = e
-                elseif IsValidItemLink(f) then
-                    fallbackLink = f
-                end
-                if IsValidItemLink(fallbackLink) then
-                    link = fallbackLink
-                end
-            end
-        end
-
-        local quantity = nil
-        if type(GetRecipeIngredientItemInfo) == "function" then
-            local okInfo, a, b, c, d, e, f = pcall(GetRecipeIngredientItemInfo, recipeListIndex, recipeIndex, i)
-            if okInfo then
-                quantity = FirstPositiveNumber(a, b, c, d, e, f)
-            end
-        end
-
-        if quantity == nil then
-            local okInfo, a, b, c, d, e, f, fromName = callAny(
-                {
-                    "GetCurrentRecipeIngredientItemInfo",
-                    "GetCurrentRecipeIngredientInfo",
-                    "GetCurrentRecipeIngredientData",
-                    "GetCurrentRecipeIngredientItemCount",
-                    "GetCurrentRecipeIngredientQuantity",
-                },
-                {
-                    { i },
-                    { recipeListIndex, recipeIndex, i },
-                }
-            )
-            if okInfo then
-                quantity = FirstPositiveNumber(a, b, c, d, e, f)
-                if not IsValidItemLink(link) then
-                    if IsValidItemLink(a) then
-                        link = a
-                    elseif IsValidItemLink(b) then
-                        link = b
-                    elseif IsValidItemLink(c) then
-                        link = c
-                    elseif IsValidItemLink(d) then
-                        link = d
-                    elseif IsValidItemLink(e) then
-                        link = e
-                    elseif IsValidItemLink(f) then
-                        link = f
-                    end
-                end
-            end
-        end
-
-        local name = nil
-        if IsValidItemLink(link) and type(GetItemLinkName) == "function" then
-            local okName, value = pcall(GetItemLinkName, link)
-            if okName and type(value) == "string" and value ~= "" then
-                name = value
-            end
-        end
-
-        if ingredientCount <= 0 and not IsValidItemLink(link) and quantity == nil then
-            break
-        end
-
-        ingredients[#ingredients + 1] = {
-            itemLink = link,
-            quantity = math.max(1, math.floor((quantity or 1) + 0.5)),
-            name = name,
-        }
-    end
-
     return ingredients
 end
 
@@ -1748,255 +771,47 @@ function bridge:_itemIdFromLink(link)
 end
 
 function bridge:_collectRecipeIngredientsByResultLink(resultItemLink)
-    local ingredients = {}
-    local targetId = self:_itemIdFromLink(resultItemLink)
-    if targetId == nil then
-        return ingredients
-    end
-
-    self._recipeResultLookupCache = self._recipeResultLookupCache or {}
-    local cached = self._recipeResultLookupCache[targetId]
-    if cached == false then
-        return ingredients
-    end
-    if type(cached) == "table" and cached.recipeListIndex and cached.recipeIndex then
-        return self:_collectRecipeIngredients(cached.recipeListIndex, cached.recipeIndex)
-    end
-
-    if type(GetNumRecipeLists) ~= "function"
-        or type(GetRecipeListInfo) ~= "function"
-        or type(GetRecipeResultItemLink) ~= "function"
-    then
-        return ingredients
-    end
-
-    local okLists, listCount = pcall(GetNumRecipeLists)
-    if not okLists or type(listCount) ~= "number" or listCount <= 0 then
-        return ingredients
-    end
-
-    for recipeListIndex = 1, listCount do
-        local okInfo, _, numRecipes = pcall(GetRecipeListInfo, recipeListIndex)
-        if okInfo and type(numRecipes) == "number" and numRecipes > 0 then
-            for recipeIndex = 1, numRecipes do
-                local okLink, link = pcall(GetRecipeResultItemLink, recipeListIndex, recipeIndex)
-                if okLink and IsValidItemLink(link) and self:_itemIdFromLink(link) == targetId then
-                    self._recipeResultLookupCache[targetId] = {
-                        recipeListIndex = recipeListIndex,
-                        recipeIndex = recipeIndex,
-                    }
-                    LogTrace("craft.materials: recipe lookup by result link hit list=" .. tostring(recipeListIndex)
-                        .. " index=" .. tostring(recipeIndex)
-                        .. " itemId=" .. tostring(targetId))
-                    return self:_collectRecipeIngredients(recipeListIndex, recipeIndex)
-                end
-            end
+    local itemId = self:_itemIdFromLink(resultItemLink)
+    if itemId then
+        local _, recipeListIndex, recipeIndex = GetRecipeInfoFromItemId(itemId)
+        if recipeListIndex and recipeIndex then
+            return self:_collectRecipeIngredients(recipeListIndex, recipeIndex)
         end
     end
-
-    self._recipeResultLookupCache[targetId] = false
-    LogTrace("craft.materials: recipe lookup by result link miss itemId=" .. tostring(targetId))
-    return ingredients
+    return {}
 end
 
 function bridge:_collectIngredientsFromSelectedData(selectedData)
-    local ingredients = {}
-    if type(selectedData) ~= "table" then
-        return ingredients
+    if selectedData and selectedData.recipeListIndex and selectedData.recipeIndex then
+        return self:_collectRecipeIngredients(selectedData.recipeListIndex, selectedData.recipeIndex)
     end
-
-    local candidates = {
-        selectedData.ingredients,
-        selectedData.ingredientData,
-        selectedData.ingredientSlotData,
-        selectedData.recipeData and selectedData.recipeData.ingredients,
-    }
-
-    for i = 1, #candidates do
-        local bucket = candidates[i]
-        if type(bucket) == "table" then
-            for _, entry in pairs(bucket) do
-                if type(entry) == "table" then
-                    local link = self:_extractItemLinkFromData(entry)
-                    local qty = tonumber(entry.requiredQuantity or entry.quantity or entry.stack or entry.stackCount)
-                    local name = entry.name
-                    if (IsValidItemLink(link) or type(name) == "string") and qty and qty > 0 then
-                        ingredients[#ingredients + 1] = {
-                            itemLink = link,
-                            quantity = math.max(1, math.floor(qty + 0.5)),
-                            name = name,
-                        }
-                    end
-                end
-            end
-        end
-    end
-
-    if #ingredients > 0 then
-        return ingredients
-    end
-
-    -- Deep fallback for furncraft: scan nested selectedData structures.
-    local visited = {}
-    local function walk(node, depth)
-        if type(node) ~= "table" or depth > 5 or visited[node] then
-            return
-        end
-        visited[node] = true
-
-        local link = self:_extractItemLinkFromData(node)
-        local qty = FirstPositiveNumber(
-            node.requiredQuantity,
-            node.quantity,
-            node.materialQuantity,
-            node.stack,
-            node.stackCount,
-            node.count,
-            node.numRequired
-        )
-        local name = node.name or node.itemName or node.ingredientName
-        if IsValidItemLink(link) and qty and qty > 0 then
-            ingredients[#ingredients + 1] = {
-                itemLink = link,
-                quantity = math.max(1, math.floor(qty + 0.5)),
-                name = type(name) == "string" and name ~= "" and name or nil,
-            }
-        end
-
-        for _, child in pairs(node) do
-            if type(child) == "table" then
-                walk(child, depth + 1)
-            end
-        end
-    end
-
-    walk(selectedData, 0)
-
-    return ingredients
+    return {}
 end
 
 function bridge:_collectSmithingPatternIngredients(craftContext)
     local ingredients = {}
-    if type(craftContext) ~= "table" then
+    if not craftContext or not craftContext.patternIndex or not craftContext.materialIndex then
         return ingredients
     end
-
-    local patternIndex = craftContext.patternIndex
-    if patternIndex == nil then
+    -- SetPendingSmithingItem supplies the selected quantity; ItemInfo's stack
+    -- is the tier baseline, not the user's current quantity slider selection.
+    local quantity = craftContext.materialQuantity
+    if not quantity or quantity <= 0 then
         return ingredients
     end
-
-    -- Probe material slots 1..12 until empty link.
-    -- This handles both single-material (weapons/armor) and multi-material (furnishings).
-    -- Quantity: try GetSmithingPatternMaterialQuantityRequired(pattern, slot), fallback to context qty.
-    local function getMatLink(slot)
-        if type(GetSmithingPatternMaterialItemLink) == "function" then
-            local ok, l = pcall(GetSmithingPatternMaterialItemLink, patternIndex, slot)
-            if ok and IsValidItemLink(l) then return l end
+    local function AddMaterial(link, count)
+        if IsValidItemLink(link) then
+            ingredients[#ingredients + 1] = {itemLink = link, quantity = count, name = GetItemLinkName(link)}
         end
-        if type(GetSmithingPatternMaterialLink) == "function" then
-            local ok, l = pcall(GetSmithingPatternMaterialLink, patternIndex, slot)
-            if ok and IsValidItemLink(l) then return l end
-        end
-        return nil
     end
-
-    local function getMatQty(slot)
-        -- Try various ESO API names for material quantity
-        for _, fnName in ipairs({"GetSmithingPatternMaterialQuantityRequired",
-                                  "GetSmithingPatternNumMaterialsRequired",
-                                  "GetSmithingPatternMaterialQuantityRequiredForResult"}) do
-            local fn = _G[fnName]
-            if type(fn) == "function" then
-                local ok, q = pcall(fn, patternIndex, slot)
-                if ok and type(q) == "number" and q > 0 then return q end
-                -- Some functions take a 3rd arg (result count = 1)
-                ok, q = pcall(fn, patternIndex, slot, 1)
-                if ok and type(q) == "number" and q > 0 then return q end
-            end
-        end
-        -- Fallback: use materialQuantity from context if this is the matching slot
-        if craftContext.materialQuantity and craftContext.materialIndex == slot then
-            return math.max(1, math.floor((tonumber(craftContext.materialQuantity) or 1) + 0.5))
-        end
-        return 1
+    AddMaterial(GetSmithingPatternMaterialItemLink(craftContext.patternIndex, craftContext.materialIndex, LINK_STYLE_DEFAULT), quantity)
+    if craftContext.styleIndex and craftContext.styleIndex > 0 then
+        AddMaterial(GetItemStyleMaterialLink(craftContext.styleIndex, LINK_STYLE_DEFAULT), 1)
     end
-
-    for slot = 1, 12 do
-        local link = getMatLink(slot)
-        if not IsValidItemLink(link) then break end
-        local qty = getMatQty(slot)
-        ingredients[#ingredients + 1] = {
-            itemLink = link,
-            quantity = qty,
-            name = (type(GetItemLinkName) == "function" and GetItemLinkName(link)) or nil,
-        }
+    if craftContext.traitIndex and craftContext.traitIndex > 0 then
+        AddMaterial(GetSmithingTraitItemLink(craftContext.traitIndex, LINK_STYLE_DEFAULT), 1)
     end
-
-    -- If nothing found via slot iteration but context has materialIndex (regular weapon/armor),
-    -- fall through to the explicit-index fallback.
-    if #ingredients > 0 then
-        return ingredients
-    end
-
-    -- Fallback: single material via context (regular weapon/armor with explicit materialIndex)
-    local materialIndex = craftContext.materialIndex
-    if materialIndex == nil then
-        return ingredients
-    end
-
-    local function tryGetLink(fnName)
-        local fn = _G[fnName]
-        if type(fn) ~= "function" then return nil end
-        local tries = {
-            { patternIndex, materialIndex, craftContext.materialQuantity, craftContext.styleIndex, craftContext.traitIndex },
-            { patternIndex, materialIndex, craftContext.styleIndex, craftContext.traitIndex },
-            { patternIndex, materialIndex },
-        }
-        for _, args in ipairs(tries) do
-            local ok, value = pcall(fn, unpack(args))
-            if ok and IsValidItemLink(value) then return value end
-        end
-        return nil
-    end
-
-    local link = tryGetLink("GetSmithingPatternMaterialItemLink")
-        or tryGetLink("GetSmithingPatternMaterialLink")
-    if IsValidItemLink(link) then
-        ingredients[#ingredients + 1] = {
-            itemLink = link,
-            quantity = math.max(1, math.floor((tonumber(craftContext.materialQuantity) or 1) + 0.5)),
-            name = (type(GetItemLinkName) == "function" and GetItemLinkName(link)) or nil,
-        }
-    end
-
     return ingredients
-end
-
-function bridge:_mergeIngredientList(baseList, appendList)
-    if type(baseList) ~= "table" or type(appendList) ~= "table" then
-        return baseList
-    end
-
-    local indexByKey = {}
-    for i = 1, #baseList do
-        local key = tostring(baseList[i].itemLink or "") .. "|" .. tostring(baseList[i].name or "")
-        indexByKey[key] = i
-    end
-
-    for i = 1, #appendList do
-        local entry = appendList[i]
-        local key = tostring(entry.itemLink or "") .. "|" .. tostring(entry.name or "")
-        local existing = indexByKey[key]
-        if existing then
-            baseList[existing].quantity = (baseList[existing].quantity or 0) + (entry.quantity or 0)
-        else
-            baseList[#baseList + 1] = entry
-            indexByKey[key] = #baseList
-        end
-    end
-
-    return baseList
 end
 
 function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
@@ -2004,44 +819,15 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
         return {}
     end
 
-    local ingredients = {}
-    if craftContext.recipeListIndex ~= nil and craftContext.recipeIndex ~= nil then
-        local r = self:_collectRecipeIngredients(craftContext.recipeListIndex, craftContext.recipeIndex)
-        ingredients = self:_mergeIngredientList(ingredients, r)
-    end
-    if #ingredients == 0 and IsValidItemLink(resultItemLink) then
-        local r = self:_collectRecipeIngredientsByResultLink(resultItemLink)
-        ingredients = self:_mergeIngredientList(ingredients, r)
-    end
-    if type(craftContext.selectedData) == "table" then
-        local r = self:_collectIngredientsFromSelectedData(craftContext.selectedData)
-        ingredients = self:_mergeIngredientList(ingredients, r)
-    end
-    if craftContext.patternIndex ~= nil and craftContext.materialIndex ~= nil
-        and craftContext.forceSmithingPatternMaterials == true
-    then
-        local r = self:_collectSmithingPatternIngredients(craftContext)
-        ingredients = self:_mergeIngredientList(ingredients, r)
-    end
-
-    -- Selected-data fallbacks can include the crafted result item itself.
-    -- Exclude it from ingredient list to avoid showing the product as a material.
-    local resultItemId = self:_itemIdFromLink(resultItemLink)
-    if resultItemId ~= nil and #ingredients > 0 then
-        local filtered = {}
-        local removed = 0
-        for i = 1, #ingredients do
-            local entry = ingredients[i]
-            local entryItemId = self:_itemIdFromLink(entry and entry.itemLink)
-            if entryItemId ~= nil and entryItemId == resultItemId then
-                removed = removed + 1
-            else
-                filtered[#filtered + 1] = entry
-            end
-        end
-        if removed > 0 then
-            ingredients = filtered
-        end
+    local ingredients
+    if craftContext.recipeListIndex and craftContext.recipeIndex then
+        ingredients = self:_collectRecipeIngredients(craftContext.recipeListIndex, craftContext.recipeIndex)
+    elseif craftContext.forceSmithingPatternMaterials then
+        ingredients = self:_collectSmithingPatternIngredients(craftContext)
+    elseif craftContext.selectedData then
+        ingredients = self:_collectIngredientsFromSelectedData(craftContext.selectedData)
+    else
+        ingredients = self:_collectRecipeIngredientsByResultLink(resultItemLink)
     end
 
     if #ingredients == 0 then
@@ -2060,19 +846,13 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
     -- Calculate every ingredient; the limit applies only to displayed rows.
     for i = 1, #ingredients do
         local entry = ingredients[i]
-        local qty = math.max(1, tonumber(entry.quantity) or 1)
+        local qty = entry.quantity
         local link = entry.itemLink
         local qualityHex = self:_getItemLinkQualityHex(link)
 
         local name = entry.name
-        if (type(name) ~= "string" or name == "") and IsValidItemLink(link) and type(GetItemLinkName) == "function" then
-            local okName, resolved = pcall(GetItemLinkName, link)
-            if okName and type(resolved) == "string" and resolved ~= "" then
-                name = resolved
-            end
-        end
-        if (type(name) ~= "string" or name == "") and IsValidItemLink(link) then
-            name = "Unknown mat."
+        if not name or name == "" then
+            name = IsValidItemLink(link) and GetItemLinkName(link) or "Unknown mat."
         end
 
         if type(name) ~= "string" or name == "" then
@@ -2195,79 +975,26 @@ function bridge:_ensureOverlayWindow()
     end
 
     local wm = WINDOW_MANAGER
-    if wm == nil and type(GetWindowManager) == "function" then
-        local ok, resolved = pcall(GetWindowManager)
-        if ok then
-            wm = resolved
-        end
-    end
-
-    if wm == nil then
-        LogDebug("Overlay unavailable: WINDOW_MANAGER missing")
-        return nil
-    end
 
     local guiRoot = _G.GuiRoot
-    if guiRoot == nil then
-        LogDebug("Overlay unavailable: GuiRoot missing")
-        return nil
-    end
-
-    local window = nil
-    local isTopLevelWindow = false
-
-    if type(wm.CreateTopLevelWindow) == "function" then
-        window = wm:CreateTopLevelWindow(MAJOR .. "_Overlay")
-        isTopLevelWindow = true
-        LogTrace("Overlay using CreateTopLevelWindow")
-    elseif type(wm.CreateControl) == "function" and CT_CONTROL ~= nil then
-        window = wm:CreateControl(MAJOR .. "_Overlay", guiRoot, CT_CONTROL)
-        LogTrace("Overlay using CreateControl fallback")
-    else
-        LogDebug("Overlay unavailable: no supported window/control factory")
-        return nil
-    end
-
-    if window == nil then
-        LogDebug("Overlay unavailable: factory returned nil")
-        return nil
-    end
+    local window = wm:CreateTopLevelWindow(MAJOR .. "_Overlay")
 
     window:SetHidden(true)
     window:SetMouseEnabled(false)
-    if type(window.SetDrawLayer) == "function" then
-        window:SetDrawLayer(DL_OVERLAY or "OVERLAY")
-    end
-    if type(window.SetDrawTier) == "function" then
-        window:SetDrawTier(DT_HIGH or DT_MEDIUM or "HIGH")
-    end
-    if type(window.SetDrawLevel) == "function" then
-        window:SetDrawLevel(10)
-    end
-    if type(window.SetMovable) == "function" then
-        window:SetMovable(false)
-    end
-    if type(window.SetClampedToScreen) == "function" then
-        window:SetClampedToScreen(true)
-    end
-    if not isTopLevelWindow and type(window.SetParent) == "function" then
-        window:SetParent(guiRoot)
-    end
+    window:SetDrawLayer(DL_OVERLAY)
+    window:SetDrawTier(DT_HIGH)
+    window:SetDrawLevel(10)
+    window:SetMovable(false)
+    window:SetClampedToScreen(true)
     window:SetDimensions(320, 120)
     window:ClearAnchors()
     window:SetAnchor(TOPRIGHT, guiRoot, TOPRIGHT, -40, 140)
 
     local backdrop = wm:CreateControl(nil, window, CT_BACKDROP)
     backdrop:SetAnchorFill(window)
-    if type(backdrop.SetCenterColor) == "function" then
-        backdrop:SetCenterColor(0, 0, 0, 0.70)
-    end
-    if type(backdrop.SetEdgeTexture) == "function" then
-        backdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/Gamepad/gp_tooltip_edge_semitrans_64.dds", 64, 8, 8)
-    end
-    if type(backdrop.SetHidden) == "function" then
-        backdrop:SetHidden(false)
-    end
+    backdrop:SetCenterColor(0, 0, 0, 0.70)
+    backdrop:SetEdgeTexture("EsoUI/Art/Miscellaneous/Gamepad/gp_tooltip_edge_semitrans_64.dds", 64, 8, 8)
+    backdrop:SetHidden(false)
 
     -- Gold border lines (CT_TEXTURE), shown only for furncraft
     local function makeBorderTex(parent)
@@ -2295,18 +1022,10 @@ function bridge:_ensureOverlayWindow()
     label:SetAnchor(TOPLEFT, window, TOPLEFT, 12, 8)
     label:SetWidth(296)
     label:SetHeight(92)
-    if type(label.SetVerticalAlignment) == "function" then
-        label:SetVerticalAlignment(TEXT_ALIGN_TOP)
-    end
-    if type(label.SetHorizontalAlignment) == "function" then
-        label:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
-    end
-    if type(label.SetFont) == "function" then
-        label:SetFont("ZoFontGamepad27")
-    end
-    if type(label.SetColor) == "function" then
-        label:SetColor(1, 1, 1, 1)
-    end
+    label:SetVerticalAlignment(TEXT_ALIGN_TOP)
+    label:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
+    label:SetFont("ZoFontGamepad27")
+    label:SetColor(1, 1, 1, 1)
 
     self._overlayWindow = {
         window = window,
@@ -2338,21 +1057,11 @@ function bridge:_ensureOverlayLineLabels(overlay, lineCount)
         local lineLabel = wm:CreateControl(nil, overlay.window, CT_LABEL)
         lineLabel:SetWidth(296)
         lineLabel:SetHeight(28)
-        if type(lineLabel.SetVerticalAlignment) == "function" then
-            lineLabel:SetVerticalAlignment(TEXT_ALIGN_TOP)
-        end
-        if type(lineLabel.SetHorizontalAlignment) == "function" then
-            lineLabel:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
-        end
-        if type(lineLabel.SetWrapMode) == "function" and type(TEXT_WRAP_MODE_ELLIPSIS) == "number" then
-            lineLabel:SetWrapMode(TEXT_WRAP_MODE_ELLIPSIS)
-        end
-        if type(lineLabel.SetFont) == "function" then
-            lineLabel:SetFont("ZoFontGamepad27")
-        end
-        if type(lineLabel.SetColor) == "function" then
-            lineLabel:SetColor(1, 1, 1, 1)
-        end
+        lineLabel:SetVerticalAlignment(TEXT_ALIGN_TOP)
+        lineLabel:SetHorizontalAlignment(TEXT_ALIGN_LEFT)
+        lineLabel:SetWrapMode(TEXT_WRAP_MODE_ELLIPSIS)
+        lineLabel:SetFont("ZoFontGamepad27")
+        lineLabel:SetColor(1, 1, 1, 1)
 
         lineLabel:ClearAnchors()
         lineLabel:SetAnchor(TOPLEFT, lineLabels[index - 1], BOTTOMLEFT, 0, 0)
@@ -2376,9 +1085,7 @@ function bridge:_renderOverlayLines(overlay, formattedLines)
     overlay.renderedLineCount = #formattedLines
     for index = 1, #lineLabels do
         local lineLabel = lineLabels[index]
-        if type(lineLabel.SetWrapMode) == "function" and type(TEXT_WRAP_MODE_ELLIPSIS) == "number" then
-            lineLabel:SetWrapMode(TEXT_WRAP_MODE_ELLIPSIS)
-        end
+        lineLabel:SetWrapMode(TEXT_WRAP_MODE_ELLIPSIS)
         local text = formattedLines[index]
         if type(text) == "string" and text ~= "" then
             lineLabel:SetHeight(28)
@@ -2393,16 +1100,13 @@ function bridge:_renderOverlayLines(overlay, formattedLines)
 end
 
 function bridge:_isRenderableControl(control)
-    return control
-        and (type(control.IsHidden) ~= "function" or control:IsHidden() == false)
-        and (type(control.GetWidth) ~= "function" or control:GetWidth() > 0)
-        and (type(control.GetHeight) ~= "function" or control:GetHeight() > 0)
+    return control ~= nil
+        and not control:IsControlHidden()
+        and control:GetWidth() > 0
+        and control:GetHeight() > 0
 end
 
 function bridge:_getOverlayTooltipBySource(source)
-    if type(GAMEPAD_TOOLTIPS) ~= "table" or type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
-        return nil
-    end
 
     local tooltipTypes = nil
     if source == "furncraft" then
@@ -2413,7 +1117,7 @@ function bridge:_getOverlayTooltipBySource(source)
 
     for i = 1, #tooltipTypes do
         local tooltipType = tooltipTypes[i]
-        if type(tooltipType) == "number" then
+        if tooltipType ~= nil then
             local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
             if self:_isRenderableControl(tooltip) then
                 return tooltip
@@ -2443,12 +1147,8 @@ function bridge:_getOverlayAnchorContainer()
     local guiRoot = _G.GuiRoot
 
     for _ = 1, 8 do
-        if type(current.GetParent) ~= "function" then
-            break
-        end
-
-        local ok, parent = pcall(current.GetParent, current)
-        if not ok or not self:_isRenderableControl(parent) or parent == guiRoot then
+        local parent = current:GetParent()
+        if parent == nil or not self:_isRenderableControl(parent) or parent == guiRoot then
             break
         end
 
@@ -2461,11 +1161,7 @@ end
 
 function bridge:_shouldKeepOverlayVisible()
     local tooltip = self:_getActiveOverlayTooltip()
-    if tooltip then
-        return true
-    end
-
-    return self:_isRenderableControl(self._overlayAnchorControl)
+    return self:_isRenderableControl(tooltip) or self:_isRenderableControl(self._overlayAnchorControl)
 end
 
 function bridge:_refreshOverlayVisibility()
@@ -2474,7 +1170,7 @@ function bridge:_refreshOverlayVisibility()
         return
     end
 
-    local now = type(GetGameTimeMilliseconds) == "function" and GetGameTimeMilliseconds() or 0
+    local now = GetGameTimeMilliseconds()
     if now - (overlay._lastVisibilityCheckAt or 0) < 100 then
         return
     end
@@ -2498,7 +1194,7 @@ function bridge:_resizeOverlayToText(overlay)
     local availableWidth = 500
     local maxHeight = 220
 
-    if tooltip and type(tooltip.GetWidth) == "function" then
+    if tooltip then
         if self._overlaySource == "furncraft" then
             availableWidth = math.max(380, math.min(math.floor(tooltip:GetWidth() * 0.92), 540))
         elseif self._overlaySource == "guildstore" then
@@ -2507,7 +1203,7 @@ function bridge:_resizeOverlayToText(overlay)
             availableWidth = math.max(430, math.min(tooltip:GetWidth() - 12, 560))
         end
     end
-    if tooltip and type(tooltip.GetHeight) == "function" then
+    if tooltip then
         if self._overlaySource == "furncraft" then
             maxHeight = math.max(280, math.min(math.floor(tooltip:GetHeight() * 1.35), 900))
         else
@@ -2515,7 +1211,7 @@ function bridge:_resizeOverlayToText(overlay)
         end
     end
 
-    if guiRoot and type(guiRoot.GetHeight) == "function" then
+    if guiRoot then
         local screenMax = math.max(220, (guiRoot:GetHeight() or 1080) - 24)
         maxHeight = math.min(maxHeight, screenMax)
     end
@@ -2528,12 +1224,10 @@ function bridge:_resizeOverlayToText(overlay)
     for index = 1, #lineLabels do
         local lineLabel = lineLabels[index]
         lineLabel:SetWidth(labelWidth)
-        if type(lineLabel.SetDimensionConstraints) == "function" then
-            lineLabel:SetDimensionConstraints(labelWidth, 0, labelWidth, maxHeight - 12)
-        end
+        lineLabel:SetDimensionConstraints(labelWidth, 0, labelWidth, maxHeight - 12)
 
         if index <= renderedLineCount then
-            local textHeight = type(lineLabel.GetTextHeight) == "function" and lineLabel:GetTextHeight() or 28
+            local textHeight = lineLabel:GetTextHeight()
             local lineHeight = math.max(30, textHeight + 2)
             lineLabel:SetHeight(lineHeight)
             lineLabel:SetHidden(false)
@@ -2570,11 +1264,9 @@ function bridge:_hideOverlay()
     self._overlayTooltipControl = nil
 
     local overlay = self._overlayWindow
-    if overlay and overlay.window and type(overlay.window.SetHidden) == "function" then
+    if overlay and overlay.window then
         overlay._lastVisibilityCheckAt = 0
-        if type(overlay.window.SetHandler) == "function" then
-            overlay.window:SetHandler("OnUpdate", nil)
-        end
+        overlay.window:SetHandler("OnUpdate", nil)
         overlay.window:SetHidden(true)
     end
 end
@@ -2600,10 +1292,10 @@ function bridge:_positionOverlay()
         if self._overlaySource == "furncraft" then
             local gap = 42
             local safe = 8
-            local overlayWidth = (type(overlay.window.GetWidth) == "function") and overlay.window:GetWidth() or 280
-            local tooltipLeft = (type(tooltip.GetLeft) == "function") and tooltip:GetLeft() or 0
-            local tooltipRight = (type(tooltip.GetRight) == "function") and tooltip:GetRight() or 0
-            local screenWidth = (type(guiRoot.GetWidth) == "function") and guiRoot:GetWidth() or 1920
+            local overlayWidth = overlay.window:GetWidth()
+            local tooltipLeft = tooltip:GetLeft()
+            local tooltipRight = tooltip:GetRight()
+            local screenWidth = guiRoot:GetWidth()
             local leftSpace = tooltipLeft - safe
             local rightSpace = screenWidth - tooltipRight - safe
 
@@ -2646,16 +1338,16 @@ function bridge:_positionOverlay()
     overlay.window:SetAnchor(point, anchorTarget, relativePoint, offsetX, offsetY)
 
     -- Keep the full dynamic window inside the screen bounds by nudging vertically.
-    local rootTop = (guiRoot and type(guiRoot.GetTop) == "function") and guiRoot:GetTop() or 0
-    local rootBottom = (guiRoot and type(guiRoot.GetBottom) == "function") and guiRoot:GetBottom() or 1080
-    local winTop = (type(overlay.window.GetTop) == "function") and overlay.window:GetTop() or rootTop
-    local winBottom = (type(overlay.window.GetBottom) == "function") and overlay.window:GetBottom() or rootBottom
+    local rootTop = guiRoot:GetTop()
+    local rootBottom = guiRoot:GetBottom()
+    local winTop = overlay.window:GetTop()
+    local winBottom = overlay.window:GetBottom()
     local safe = 6
     local adjustY = 0
-    if type(winBottom) == "number" and type(rootBottom) == "number" and winBottom > (rootBottom - safe) then
+    if winBottom > (rootBottom - safe) then
         adjustY = adjustY - (winBottom - (rootBottom - safe))
     end
-    if type(winTop) == "number" and type(rootTop) == "number" and (winTop + adjustY) < (rootTop + safe) then
+    if (winTop + adjustY) < (rootTop + safe) then
         adjustY = adjustY + ((rootTop + safe) - (winTop + adjustY))
     end
 
@@ -2789,10 +1481,6 @@ function bridge:_buildCompactOverlayLines(lines, source)
 end
 
 function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation)
-    if type(zo_callLater) ~= "function" then
-        return false
-    end
-
     retryCount = tonumber(retryCount) or 0
     if retryCount >= 6 then
         return false
@@ -2810,6 +1498,9 @@ function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCo
 end
 
 function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, generation)
+    if not self.enabled then
+        return
+    end
     if generation == nil then
         self._overlayGeneration = (self._overlayGeneration or 0) + 1
         generation = self._overlayGeneration
@@ -2845,21 +1536,15 @@ function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, gen
     local isFurncraft = (source == "furncraft")
     if overlay.backdrop then
         if isFurncraft then
-            if type(overlay.backdrop.SetCenterColor) == "function" then
-                overlay.backdrop:SetCenterColor(0, 0, 0, 0.70)
-            end
-            if type(overlay.backdrop.SetHidden) == "function" then
-                overlay.backdrop:SetHidden(false)
-            end
+            overlay.backdrop:SetCenterColor(0, 0, 0, 0.70)
+            overlay.backdrop:SetHidden(false)
         else
-            if type(overlay.backdrop.SetHidden) == "function" then
-                overlay.backdrop:SetHidden(true)
-            end
+            overlay.backdrop:SetHidden(true)
         end
     end
     for _, bName in ipairs({ "borderTop", "borderBottom", "borderLeft", "borderRight" }) do
         local b = overlay[bName]
-        if b and type(b.SetHidden) == "function" then
+        if b then
             b:SetHidden(not isFurncraft)
         end
     end
@@ -2873,14 +1558,12 @@ function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, gen
         end
     end
 
-    if type(overlay.window.SetHandler) == "function" then
-        if not bridge._onRefreshOverlay then
-            bridge._onRefreshOverlay = function()
-                bridge:_refreshOverlayVisibility()
-            end
+    if not bridge._onRefreshOverlay then
+        bridge._onRefreshOverlay = function()
+            bridge:_refreshOverlayVisibility()
         end
-        overlay.window:SetHandler("OnUpdate", bridge._onRefreshOverlay)
     end
+    overlay.window:SetHandler("OnUpdate", bridge._onRefreshOverlay)
     overlay.window:SetHidden(false)
     LogDebug(string.format("Overlay shown: source=%s lines=%d", tostring(source), #lines))
 end
@@ -2906,7 +1589,7 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
         }, ":")
     end
     local dedupKey = itemLink .. "|" .. tostring(stackCount or "") .. "|" .. tostring(listingPrice or "") .. "|" .. contextKey
-    local now = type(GetGameTimeMilliseconds) == "function" and GetGameTimeMilliseconds() or 0
+    local now = GetGameTimeMilliseconds()
     if tooltip._lgcmbLastKey == dedupKey and now - (tooltip._lgcmbLastLinkTime or 0) < 200 then
         return
     end
@@ -2934,681 +1617,149 @@ function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
     self:_showOverlayLines(lines, source, tooltip)
 end
 
--- Look up the purchase price (and stack count) of a trading house search result that
--- matches the given item link.  Returns totalPrice, stack2 (both may be nil on failure).
--- stackCount and sellerName are used as optional filters when provided; if itemLink
--- matching fails (e.g., link style mismatch) we fall back to returning data from the
--- first result whose item ID matches.
+-- Price lookup is limited to the selected Trading House lot; no item-ID scan.
+
 function bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
-    -- GetTradingHouseSearchResultItemInfo(i) →
-    --   icon, itemName, displayQuality, stackCount, sellerName, timeRemaining, purchasePrice, currencyType, uid
-    -- GetTradingHouseSearchResultItemLink(i) → itemLink
-    local getInfoFn = type(GetTradingHouseSearchResultItemInfo) == "function"
-                      and GetTradingHouseSearchResultItemInfo
-                   or type(GetGuildStoreSearchResultItemInfo) == "function"
-                      and GetGuildStoreSearchResultItemInfo
-                   or nil
-    local getLinkFn = type(GetTradingHouseSearchResultItemLink) == "function"
-                      and GetTradingHouseSearchResultItemLink
-                   or type(GetGuildStoreSearchResultItemLink) == "function"
-                      and GetGuildStoreSearchResultItemLink
-                   or nil
-
-    if not getInfoFn then
-        LogTrace("lookup: no item-info API found")
+    local scene = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS
+    -- BrowseResults inherits ZO_SortFilterList, not a parametric gamepad list.
+    local selectedData = scene and scene:GetSelectedData()
+    if not selectedData then
         return nil, nil
     end
-
-    -- Extract the numeric item-type ID from a link string for fuzzy fallback.
-    local function itemIdFromLink(link)
-        if type(link) ~= "string" then return nil end
-        return link:match("|H%d+:item:(%d+):")
-    end
-    local targetId = itemIdFromLink(itemLink)
-
-    -- APPROACH 1: Gamepad TH browse list — read DIRECTLY from scroll list data entries.
-    -- ESO stores itemLink, stackCount, purchasePrice in each entry's data table.
-    -- This is reliable even when GetTradingHouseSearchResultItemLink is unavailable.
-    -- We also verify the link matches before trusting the data.
-    if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
-        local scene = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS
-        local list = scene.itemList or scene.list or scene.parametricList
-                  or (scene.categoryList and scene.categoryList.list)
-        if list then
-            local selectedData = nil
-            if type(list.GetTargetData) == "function" then
-                local ok2, d2 = pcall(function() return list:GetTargetData() end)
-                if ok2 then selectedData = d2 end
-            end
-            if not selectedData and type(ZO_ScrollList_GetSelectedData) == "function" then
-                local ok2, d2 = pcall(ZO_ScrollList_GetSelectedData, list)
-                if ok2 and type(d2) == "table" then selectedData = d2 end
-            end
-            if selectedData then
-                -- Try to read all fields directly from data (most reliable path).
-                -- ESO TH browse result entries contain: itemLink, stackCount, purchasePrice.
-                local dataLink = selectedData.itemLink or selectedData.link
-                local dataSc   = selectedData.stackCount or selectedData.count
-                local dataPrice = selectedData.purchasePrice
-
-                if type(dataLink) == "string" and dataLink:find("|H") and dataLink == itemLink
-                   and type(dataSc) == "number" and type(dataPrice) == "number" then
-                    LogTrace("lookup: A1 from data fields sc=" .. tostring(dataSc) .. " price=" .. tostring(dataPrice))
-                    return dataPrice, dataSc
-                end
-
-                -- Fallback: use slotIndex + getInfoFn, verified via getLinkFn or data.itemLink.
-                local slotIndex = selectedData.slotIndex or selectedData.index or selectedData.slot
-                if type(slotIndex) == "number" then
-                    local slotLink = nil
-                    if getLinkFn then
-                        local okL, l = pcall(getLinkFn, slotIndex)
-                        if okL then slotLink = l end
-                    elseif type(dataLink) == "string" and dataLink:find("|H") then
-                        slotLink = dataLink  -- use data.itemLink as verification source
-                    end
-                    local linkMatches = (slotLink == itemLink)
-                    LogTrace("lookup: A1 slot=" .. tostring(slotIndex)
-                        .. " slotLink=" .. tostring(slotLink and slotLink:sub(1,30) or "nil")
-                        .. " match=" .. tostring(linkMatches))
-                    -- Trust the scroll list's current selection: GetTargetData() is up-to-date
-                    -- when LayoutItem fires (scene updates list selection before calling LayoutItem).
-                    -- Same-type listings share itemLink, so link-matching is unreliable;
-                    -- slotIndex uniquely identifies a listing and getInfoFn gives its exact data.
-                    local ok2, _, _, _, sc, _, _, totalPrice = pcall(getInfoFn, slotIndex)
-                    if ok2 and type(totalPrice) == "number" then
-                        LogTrace("lookup: A1 result sc=" .. tostring(sc)
-                            .. " price=" .. tostring(totalPrice)
-                            .. " linkVerified=" .. tostring(linkMatches))
-                        return totalPrice, sc
-                    end
-                    -- getInfoFn failed — fall through to scan.
-                else
-                    if self.debugVerbose then
-                        local keys = ""
-                        for k, _ in pairs(selectedData) do keys = keys .. tostring(k) .. " " end
-                        LogTrace("lookup: A1 data keys=" .. keys:sub(1, 120))
-                    end
-                end
-            else
-                LogTrace("lookup: GAMEPAD_TH_BROWSE list=" .. tostring(list)
-                    .. " ZO_SL_fn=" .. tostring(type(ZO_ScrollList_GetSelectedData) == "function"))
-            end
-        else
-            LogTrace("lookup: GAMEPAD_TH_BROWSE no list (itemList=" .. tostring(scene.itemList)
-                .. " list=" .. tostring(scene.list)
-                .. " parametricList=" .. tostring(scene.parametricList) .. ")")
-        end
-    end
-
-    -- APPROACH 2: Walk all visible scroll-list entries and find one matching itemLink.
-    -- This works even without GetTradingHouseSearchResultItemLink by reading data.itemLink
-    -- directly from each entry.  Falls back to getInfoFn scan when data fields are absent.
-    if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
-        local scene = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS
-        local list = scene.itemList or scene.list or scene.parametricList
-                  or (scene.categoryList and scene.categoryList.list)
-        -- ZO_ScrollList exposes the underlying data array via .data (keyboard)
-        -- or via iteration helpers.  Try to iterate all entries.
-        if list then
-            local allData = nil
-            -- ZO_ScrollList stores scroll data in list.scrollControl.data or .data arrays
-            local scrollCtrl = type(list.GetScrollControl) == "function" and list:GetScrollControl() or list
-            if type(scrollCtrl) == "table" then
-                allData = scrollCtrl.data or scrollCtrl.scrollData
-            end
-            if type(allData) == "table" then
-                for _, entry in ipairs(allData) do
-                    local ed = type(entry) == "table" and (entry.data or entry) or nil
-                    if type(ed) == "table" then
-                        local eLink  = ed.itemLink or ed.link
-                        local eSc    = ed.stackCount or ed.count
-                        local ePrice = ed.purchasePrice
-                        if type(eLink) == "string" and eLink == itemLink
-                           and type(eSc) == "number" and type(ePrice) == "number" then
-                            LogTrace("lookup: A2 scrollData match sc=" .. tostring(eSc)
-                                .. " price=" .. tostring(ePrice))
-                            return ePrice, eSc
-                        end
-                    end
-                end
-            end
-        end
-    end
-
-    -- APPROACH 3: Scan results via getInfoFn iteration (requires getLinkFn to match correctly).
-    -- Without getLinkFn this can only return the first result, so skip if no link function.
-    if not getLinkFn then
-        LogTrace("lookup: no linkFn, skipping scan (would return wrong item)")
+    local selectedLink = selectedData.isGuildSpecificItem and GetGuildSpecificItemLink(selectedData.slotIndex) or selectedData.itemLink
+    if selectedLink ~= itemLink then
         return nil, nil
     end
-
-    local fallbackPrice, fallbackStack = nil, nil
-
-    for i = 1, 200 do
-        local okInfo, _, _, _, sc, seller2, _, totalPrice = pcall(getInfoFn, i)
-        if not okInfo or type(totalPrice) ~= "number" then break end
-
-        local passFilters = (not sellerName or seller2 == sellerName)
-            and (not stackCount or not (type(stackCount) == "number") or sc == stackCount)
-        if passFilters then
-            local okLink, link2 = pcall(getLinkFn, i)
-            if self.debugVerbose and i <= 3 then
-                LogTrace("lookup[" .. i .. "]: link2=" .. tostring(link2):sub(1,40)
-                    .. " match=" .. tostring(okLink and link2 == itemLink))
-            end
-            if okLink and link2 == itemLink then
-                return totalPrice, sc   -- exact match
-            end
-            if targetId and fallbackPrice == nil and itemIdFromLink(link2) == targetId then
-                fallbackPrice, fallbackStack = totalPrice, sc
-            end
-        end
+    if sellerName and selectedData.sellerName ~= sellerName then
+        return nil, nil
     end
-
-    if fallbackPrice == nil then
-        LogTrace("lookup: A3 scan done, no match")
+    if stackCount and selectedData.stackCount ~= stackCount then
+        return nil, nil
     end
-
-    return fallbackPrice, fallbackStack
+    return selectedData.purchasePrice, selectedData.stackCount
 end
 
 function bridge:_hookTooltipPrice()
     if self._tooltipPriceHooked then
         return true
     end
-
-    LogTrace("Attempting to hook tooltip price...")
-
-    if type(GAMEPAD_TOOLTIPS) ~= "table" then
-        LogTrace("GAMEPAD_TOOLTIPS not available (type: " .. type(GAMEPAD_TOOLTIPS) .. ")")
+    -- The manager/container instances can be created after addon load.
+    if not GAMEPAD_TOOLTIPS then
         return false
     end
-
-    if type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then
-        LogTrace("GAMEPAD_TOOLTIPS.GetTooltip not available")
-        return false
-    end
-
-    local tooltipTypes = {
-        GAMEPAD_LEFT_TOOLTIP,
-        GAMEPAD_RIGHT_TOOLTIP,
-        GAMEPAD_MOVABLE_TOOLTIP,
-    }
-
-    local hookedAny = false
-    for i = 1, #tooltipTypes do
-        local tooltipType = tooltipTypes[i]
-        LogTrace("Checking tooltip type " .. tostring(i) .. ": " .. tostring(tooltipType))
-
-        local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
-        LogTrace("Got tooltip: " .. type(tooltip))
-
-        if tooltip ~= nil then
-            if tooltipType == GAMEPAD_RIGHT_TOOLTIP
-                and type(tooltip.SetHidden) == "function"
-                and not tooltip._lgcmbOverlayHideHooked
-            then
-                ZO_PostHook(tooltip, "SetHidden", function(ctrl, hidden)
-                    if hidden then
-                        bridge:_hideOverlay()
-                        LogTrace("Overlay hidden because GAMEPAD_RIGHT_TOOLTIP was hidden")
-                    end
-                end)
-                tooltip._lgcmbOverlayHideHooked = true
-                hookedAny = true
-                LogTrace("Hooked GAMEPAD_RIGHT_TOOLTIP hide for overlay cleanup")
-            end
-
-            -- LayoutBagItem: append after the base tooltip is fully laid out.
-            if type(tooltip.LayoutBagItem) == "function" and not tooltip._lgcmbBagHooksInstalled then
-                ZO_PostHook(tooltip, "LayoutBagItem", function(ctrl, bagId, slotIndex, ...)
-                    if not bridge.enabled then return end
-                    ctrl._lgcmbLastKey = nil
-                    bridge:_appendGamepadTooltipInfo(ctrl, bagId, slotIndex, "bag")
-                end)
-                tooltip._lgcmbBagHooksInstalled = true
-                hookedAny = true
-                LogDebug("Hooked LayoutBagItem post-layout on tooltip " .. tostring(i))
-            end
-
-            -- LayoutFurnishingCraftingResult: append after the crafting result tooltip is laid out.
-            if type(tooltip.LayoutFurnishingCraftingResult) == "function" and not tooltip._lgcmbFurnCraftHooked then
-                ZO_PreHook(tooltip, "LayoutFurnishingCraftingResult", function(ctrl, ...)
-                    local args = {...}
-                    if type(args[1]) == "number" then
-                        bridge._pendingCraftingContext = bridge:_makeCraftContext(args[1], args[2], args[3], args[4], args[5])
-                    else
-                        bridge._pendingCraftingContext = nil
-                    end
-                end)
-                ZO_PostHook(tooltip, "LayoutFurnishingCraftingResult", function(ctrl, ...)
-                    if not bridge.enabled then return end
-                    bridge._templateCraftingOverlayActive = true
-                    if not bridge:_shouldShowTemplateCraftingOverlay() then
-                        bridge:_hideOverlay()
-                        return
-                    end
-                    local furnCraftCtx = bridge:_resolveCurrentFurnishingCraftContext(ZO_GamepadSmithingCreation, bridge._pendingCraftingContext)
-                    bridge._pendingCraftingContext = furnCraftCtx
-                    local link = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
-                    if type(link) == "string" and link:find("|H") then
-                        ctrl._lgcmbLastKey = nil
-                        bridge:_appendGamepadTooltipInfoByLink(ctrl, link, nil, nil, "furncraft", furnCraftCtx)
-                    end
-                end)
-                tooltip._lgcmbFurnCraftHooked = true
-                hookedAny = true
-                LogDebug("Hooked LayoutFurnishingCraftingResult on tooltip " .. tostring(i))
-            end
-
-            if type(tooltip.LayoutItemLink) == "function" and not tooltip._lgcmbCraftItemLinkHooked then
-                ZO_PostHook(tooltip, "LayoutItemLink", function(ctrl, itemLink, ...)
-                    if not bridge.enabled or not bridge._craftingStationActive then return end
-                    if not bridge:_shouldShowTemplateCraftingOverlay() then
-                        bridge:_hideOverlay()
-                        return
-                    end
-
-                    if IsValidItemLink(itemLink) then
-                        local furnCraftCtx = bridge:_resolveCurrentFurnishingCraftContext(ZO_GamepadSmithingCreation, bridge._pendingCraftingContext)
-                        bridge._pendingCraftingContext = furnCraftCtx
-                        ctrl._lgcmbLastKey = nil
-                        bridge:_appendGamepadTooltipInfoByLink(ctrl, itemLink, nil, nil, "furncraft", furnCraftCtx)
-                    end
-                end)
-                tooltip._lgcmbCraftItemLinkHooked = true
-                hookedAny = true
-                LogDebug("Hooked LayoutItemLink for crafting tooltips on tooltip " .. tostring(i))
-            end
+    local allHooked = true
+    for _, kind in ipairs({GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP}) do
+        local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(kind)
+        if not tooltip then
+            allHooked = false
+        elseif not tooltip._lgcmbBagHooksInstalled then
+            SecurePostHook(tooltip, "LayoutBagItem", function(control, bagId, slotIndex)
+                if bridge.enabled then
+                    bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex, "bag")
+                end
+            end)
+            ZO_PostHookHandler(tooltip, "OnEffectivelyHidden", function(control)
+                if bridge._overlayTooltipControl == control then
+                    bridge:_hideOverlay()
+                end
+            end)
+            tooltip._lgcmbBagHooksInstalled = true
         end
     end
-
-    if type(GAMEPAD_INVENTORY) == "table"
-        and type(GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip) == "function"
-        and not GAMEPAD_INVENTORY._lgcmbTooltipCategoryWrapped
-    then
-        local updateCategoryLeftTooltip = GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip
-        GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip = function(control, ...)
-            local result = updateCategoryLeftTooltip(control, ...)
-            if control and control.selectedEquipSlot and type(GAMEPAD_TOOLTIPS.LayoutBagItem) == "function" then
-                GAMEPAD_TOOLTIPS:LayoutBagItem(GAMEPAD_LEFT_TOOLTIP, BAG_WORN, control.selectedEquipSlot)
-                LogTrace("Refreshed left tooltip for selected equipped slot")
-            end
-            return result
-        end
-        GAMEPAD_INVENTORY._lgcmbTooltipCategoryWrapped = true
-        hookedAny = true
-        LogTrace("Hooked GAMEPAD_INVENTORY.UpdateCategoryLeftTooltip")
-    end
-
-    if hookedAny then
-        self._tooltipPriceHooked = true
-        LogDebug("Tooltip info hook registered successfully")
-        return true
-    end
-
-    LogTrace("No tooltips were hooked")
-    return false
+    self._tooltipPriceHooked = allHooked
+    return allHooked
 end
 
--- Hook crafting station result tooltips in gamepad mode.
--- Follows the same pattern as TTC (SecurePostHook on the crafting singleton,
--- get the item link from crafting API, append to the active gamepad tooltip).
--- This handles cases where the crafting system calls LayoutFurnishingCraftingResult
--- (no item link in args) instead of LayoutItemLink.
 function bridge:_hookCraftingTooltips()
-    if self._craftingTooltipsHooked then return true end
-    if type(SecurePostHook) ~= "function" then return false end
-    if type(GAMEPAD_TOOLTIPS) ~= "table" then return false end
-
-    local function appendToActiveCraftingTooltip(link, craftContext)
-        if not bridge.enabled then return end
-        if type(link) ~= "string" or not link:find("|H") then return end
-        if not bridge:_shouldShowTemplateCraftingOverlay() then return end
-        -- Try tooltip types in order: LEFT is the typical crafting preview tooltip
-        local types = {GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP}
-        for _, tType in ipairs(types) do
-            if type(tType) == "number" then
-                local tt = type(GAMEPAD_TOOLTIPS.GetTooltip) == "function"
-                    and GAMEPAD_TOOLTIPS:GetTooltip(tType) or nil
-                if tt ~= nil then
-                    bridge:_appendGamepadTooltipInfoByLink(tt, link, nil, nil, "furncraft", craftContext)
-                    return
-                end
-            end
-        end
-    end
-
-    local hooked = false
-
-    -- CraftStore pattern: the smithing result tooltip receives full context via
-    -- SetPendingSmithingItem(pid, mid, mq, sid, tid). This is reliable for both
-    -- regular smithing and furnishing templates.
-    local function hookSetPendingSmithingItem(target, targetName)
-        if type(target) ~= "table" then
-            return false
-        end
-        if type(target.SetPendingSmithingItem) ~= "function" then
-            return false
-        end
-        if target._lgcmbSetPendingHooked then
-            return false
-        end
-
-        ZO_PreHook(target, "SetPendingSmithingItem", function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            local link = bridge:_resolveSmithingPatternResultLink(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            bridge._pendingCraftingLink = link
-            bridge._pendingCraftingContext = bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            bridge._templateCraftingOverlayActive = IsValidItemLink(bridge._pendingCraftingLink)
-            LogDebug("SetPendingSmithingItem PRE (" .. tostring(targetName) .. "): pid=" .. tostring(patternIndex)
-                .. " mid=" .. tostring(materialIndex)
-                .. " qty=" .. tostring(materialQuantity)
-                .. " link=" .. tostring(bridge._pendingCraftingLink):sub(1, 45))
-        end)
-
-        SecurePostHook(target, "SetPendingSmithingItem", function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            if not bridge.enabled then return end
-            local link = bridge._pendingCraftingLink
-            if not IsValidItemLink(link) then
-                local resolved = bridge:_resolveSmithingPatternResultLink(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                if IsValidItemLink(resolved) then
-                    link = resolved
-                    bridge._pendingCraftingLink = resolved
-                end
-            end
-            if IsValidItemLink(link) then
-                appendToActiveCraftingTooltip(link, bridge._pendingCraftingContext)
-            end
-        end)
-
-        target._lgcmbSetPendingHooked = true
-        LogDebug("Hooked SetPendingSmithingItem on " .. tostring(targetName))
+    if self._craftingTooltipsHooked then
         return true
     end
-
-    do
-        local candidates = {
-            { _G["ZO_SmithingTopLevelCreationPanelResultTooltip"], "ZO_SmithingTopLevelCreationPanelResultTooltip" },
-            { _G["ZO_GamepadSmithingTopLevelCreationPanelResultTooltip"], "ZO_GamepadSmithingTopLevelCreationPanelResultTooltip" },
-            { _G["ZO_GamepadSmithingTopLevelResultTooltip"], "ZO_GamepadSmithingTopLevelResultTooltip" },
-        }
-        for i = 1, #candidates do
-            if hookSetPendingSmithingItem(candidates[i][1], candidates[i][2]) then
-                hooked = true
-            end
+    -- Hook the actual gamepad classes, not guessed globals or keyboard overrides.
+    local function ShowResult(control, tooltip, itemLink, context)
+        if not bridge.enabled then
+            return
         end
+        if control:IsControlHidden() or not IsValidItemLink(itemLink) then
+            bridge._templateCraftingOverlayActive = false
+            bridge:_hideOverlay()
+            return
+        end
+        bridge._templateCraftingOverlayActive = true
+        bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, nil, nil, "furncraft", context)
     end
-
-    -- Smithing / clothier / woodworking creation (keyboard class; fires in gamepad mode only if
-    -- ZO_GamepadSmithingCreation does NOT override SetupResultTooltip, so kept as fallback).
-    -- PRE-hook caches the link so LayoutFurnishingCraftingResult (hooked in _hookTooltipPrice)
-    -- can pick it up before the tooltip is laid out.
-    if type(ZO_SmithingCreation) == "table"
-        and type(ZO_SmithingCreation.SetupResultTooltip) == "function"
-    then
-        ZO_PreHook(ZO_SmithingCreation, "SetupResultTooltip",
-            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                bridge._pendingCraftingLink = bridge:_resolveSmithingPatternResultLink(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                bridge._pendingCraftingContext = bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-            end)
-        SecurePostHook(ZO_SmithingCreation, "SetupResultTooltip",
-            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
-                local link = bridge._pendingCraftingLink
-                appendToActiveCraftingTooltip(link, bridge._pendingCraftingContext)
-            end)
-        hooked = true
-        LogDebug("Hooked ZO_SmithingCreation.SetupResultTooltip")
-    end
-
-    -- Gamepad smithing creation — overrides SetupResultTooltip and uses its own
-    -- resultTooltip.tip floating control instead of the standard GAMEPAD_TOOLTIPS pool.
-    -- PRE-hook caches the link (for LayoutFurnishingCraftingResult top-inject path).
-    -- POST-hook appends directly to resultTooltip.tip as a second path.
-    if type(ZO_GamepadSmithingCreation) == "table"
-        and type(ZO_GamepadSmithingCreation.SetupResultTooltip) == "function"
-    then
-        ZO_PreHook(ZO_GamepadSmithingCreation, "SetupResultTooltip",
-            function(_, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                bridge._pendingCraftingLink = bridge:_resolveSmithingPatternResultLink(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                bridge._pendingCraftingContext = bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                if not IsValidItemLink(bridge._pendingCraftingLink) then
-                    bridge._pendingCraftingLink = bridge:_resolveCurrentFurnishingLink(ZO_GamepadSmithingCreation)
-                end
-                bridge._templateCraftingOverlayActive = IsValidItemLink(bridge._pendingCraftingLink)
-            end)
-        SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip",
-            function(selfArg, patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
-                if not bridge.enabled then return end
-                local link = bridge._pendingCraftingLink
-                if not IsValidItemLink(link) then
-                    link = bridge:_resolveCurrentFurnishingLink(selfArg)
-                    bridge._pendingCraftingLink = link
-                end
-                bridge._templateCraftingOverlayActive = IsValidItemLink(link)
-                if type(link) ~= "string" or not link:find("|H") then
-                    return
-                end
-                -- Also try the dedicated resultTooltip panel used by gamepad smithing.
-                local tip = selfArg and selfArg.resultTooltip and selfArg.resultTooltip.tip
-                if tip then
-                    bridge:_appendGamepadTooltipInfoByLink(tip, link, nil, nil, "furncraft", bridge._pendingCraftingContext)
-                end
-            end)
-        hooked = true
-        LogDebug("Hooked ZO_GamepadSmithingCreation.SetupResultTooltip")
-    end
-
-    -- Provisioner (food/drink recipes)
-    if type(ZO_Provisioner) == "table"
-        and type(ZO_Provisioner.RefreshRecipeDetails) == "function"
-    then
-        SecurePostHook(ZO_Provisioner, "RefreshRecipeDetails", function(ctrl)
-            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
-            local recipeListIndex = type(ctrl.GetSelectedRecipeListIndex) == "function" and ctrl:GetSelectedRecipeListIndex() or nil
-            local recipeIndex     = type(ctrl.GetSelectedRecipeIndex)     == "function" and ctrl:GetSelectedRecipeIndex()     or nil
-            if recipeListIndex and recipeIndex then
-                local link = GetRecipeResultItemLink(recipeListIndex, recipeIndex)
-                appendToActiveCraftingTooltip(link, bridge:_makeRecipeCraftContext(recipeListIndex, recipeIndex))
-            end
-        end)
-        hooked = true
-        LogDebug("Hooked ZO_Provisioner.RefreshRecipeDetails")
-    end
-
-    -- Gamepad provisioner furnishing templates use RefreshRecipeDetails(selectedData)
-    -- and populate the tooltip via resultTooltip.tip:SetProvisionerResultItem(...).
-    if type(ZO_GamepadProvisioner) == "table"
-        and type(ZO_GamepadProvisioner.RefreshRecipeDetails) == "function"
-    then
-        SecurePostHook(ZO_GamepadProvisioner, "RefreshRecipeDetails", function(selfArg, selectedData)
-            if not bridge.enabled then return end
-            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
-
-            local isFurnishingTemplate = type(selectedData) == "table"
-                and ((type(PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING) == "number"
-                    and selectedData.specialIngredientType == PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING)
-                    or (type(PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING) == "number"
-                        and selfArg.filterType == PROVISIONER_SPECIAL_INGREDIENT_TYPE_FURNISHING))
-            bridge._templateCraftingOverlayActive = isFurnishingTemplate
-
-            if type(selectedData) ~= "table" then
-                bridge:_hideOverlay()
-                return
-            end
-
-            if not isFurnishingTemplate then
-                bridge:_hideOverlay()
-                return
-            end
-
-            local recipeListIndex = selectedData.recipeListIndex
-            local recipeIndex = selectedData.recipeIndex
-            if recipeListIndex == nil and type(selfArg.GetRecipeData) == "function" then
-                local ok, recipeData = pcall(selfArg.GetRecipeData, selfArg)
-                if ok and type(recipeData) == "table" then
-                    recipeListIndex = recipeData.recipeListIndex or recipeListIndex
-                    recipeIndex = recipeData.recipeIndex or recipeIndex
-                end
-            end
-
-            if recipeListIndex == nil or recipeIndex == nil or type(GetRecipeResultItemLink) ~= "function" then
-                return
-            end
-
-            local ok, link = pcall(GetRecipeResultItemLink, recipeListIndex, recipeIndex)
-            if not ok or not IsValidItemLink(link) then
-                return
-            end
-
-            local tip = selfArg and selfArg.resultTooltip and selfArg.resultTooltip.tip
-            if tip then
-                bridge:_appendGamepadTooltipInfoByLink(
-                    tip,
-                    link,
-                    nil,
-                    nil,
-                    "furncraft",
-                    bridge:_makeRecipeCraftContext(recipeListIndex, recipeIndex, selectedData)
-                )
-            else
-                appendToActiveCraftingTooltip(link, bridge:_makeRecipeCraftContext(recipeListIndex, recipeIndex, selectedData))
-            end
-        end)
-        hooked = true
-        LogDebug("Hooked ZO_GamepadProvisioner.RefreshRecipeDetails")
-    end
-
-    -- Enchanting
-    if type(ZO_Enchanting) == "table"
-        and type(ZO_Enchanting.UpdateTooltip) == "function"
-    then
-        SecurePostHook(ZO_Enchanting, "UpdateTooltip", function()
-            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
-            local link = type(ENCHANTING) == "table"
-                and type(ENCHANTING.GetResultItemLink) == "function"
-                and ENCHANTING:GetResultItemLink() or nil
-            appendToActiveCraftingTooltip(link, { station = "enchanting" })
-        end)
-        hooked = true
-        LogDebug("Hooked ZO_Enchanting.UpdateTooltip")
-    end
-
-    -- Alchemy
-    if type(ZO_Alchemy) == "table"
-        and type(ZO_Alchemy.UpdateTooltip) == "function"
-    then
-        SecurePostHook(ZO_Alchemy, "UpdateTooltip", function()
-            if not (type(IsInGamepadPreferredMode) == "function" and IsInGamepadPreferredMode()) then return end
-            local link = type(ALCHEMY) == "table"
-                and type(ALCHEMY.GetResultItemLink) == "function"
-                and ALCHEMY:GetResultItemLink() or nil
-            appendToActiveCraftingTooltip(link)
-        end)
-        hooked = true
-        LogDebug("Hooked ZO_Alchemy.UpdateTooltip")
-    end
-
-    if hooked then
-        self._craftingTooltipsHooked = true
-        return true
-    end
-    return false
+    SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip", function(creation, pattern, material, quantity, styleId, trait)
+        local context = bridge:_makeCraftContext(pattern, material, quantity, styleId, trait)
+        context.forceSmithingPatternMaterials = true
+        local link = GetSmithingPatternResultLink(pattern, material, quantity, styleId, trait, LINK_STYLE_DEFAULT)
+        ShowResult(creation.resultTooltip, creation.resultTooltip.tip, link, context)
+    end)
+    SecurePostHook(ZO_GamepadProvisioner, "RefreshRecipeDetails", function(provisioner, selectedData)
+        if not selectedData then
+            bridge._templateCraftingOverlayActive = false
+            bridge:_hideOverlay()
+            return
+        end
+        local listIndex, recipeIndex = selectedData.recipeListIndex, selectedData.recipeIndex
+        local link = GetRecipeResultItemLink(listIndex, recipeIndex, LINK_STYLE_DEFAULT)
+        local context = bridge:_makeRecipeCraftContext(listIndex, recipeIndex, selectedData)
+        ShowResult(provisioner.resultTooltip, provisioner.resultTooltip.tip, link, context)
+    end)
+    SecurePostHook(ZO_GamepadAlchemy, "UpdateTooltip", function(alchemy)
+        local link = alchemy:IsCraftable() and alchemy:GetResultItemLink() or nil
+        ShowResult(alchemy.tooltip, alchemy.tooltip.tip, link)
+    end)
+    SecurePostHook(ZO_GamepadEnchanting, "UpdateTooltip", function(enchanting)
+        local link = enchanting:IsCraftable() and enchanting:GetResultItemLink() or nil
+        ShowResult(enchanting.resultTooltip, enchanting.resultTooltip.tip, link)
+    end)
+    self._craftingTooltipsHooked = true
+    return true
 end
 
--- Hook the trading-house browse-results tooltip in gamepad mode.
--- The reliable hook point is the tooltip's own LayoutGuildStoreSearchResult method,
--- which is attached dynamically when the gamepad trading house UI is opened.
 function bridge:_hookTradingHouseTooltip()
     if self._tradingHouseTooltipHooked then
         return true
     end
-
-    if type(GAMEPAD_TOOLTIPS) ~= "table" then return false end
-    if type(GAMEPAD_TOOLTIPS.GetTooltip) ~= "function" then return false end
-
-    local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(GAMEPAD_RIGHT_TOOLTIP)
-    if not tooltip then return false end
-    if type(tooltip.LayoutGuildStoreSearchResult) ~= "function" then return false end
-    if tooltip._lgcmbTradingHouseLayoutHooked then
-        self._tradingHouseTooltipHooked = true
-        return true
+    if not GAMEPAD_TOOLTIPS then
+        return false
     end
-
-    ZO_PreHook(tooltip, "LayoutGuildStoreSearchResult", function(ctrl, itemLink, stackCount, sellerName, ...)
+    local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(GAMEPAD_RIGHT_TOOLTIP)
+    if not tooltip then
+        return false
+    end
+    SecurePostHook(tooltip, "LayoutGuildStoreSearchResult", function(control, itemLink, stackCount, sellerName)
         if not bridge.enabled then
             return
         end
-
-        if type(itemLink) ~= "string" or not itemLink:find("|H") then
-            return
-        end
-
-        local listingPrice, resolvedStackCount = bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
-        ctrl._lgcmbPendingInfo = {
-            link = itemLink,
-            stackCount = resolvedStackCount or stackCount,
-            listingPrice = listingPrice,
-        }
-    end)
-
-    ZO_PostHook(tooltip, "LayoutGuildStoreSearchResult", function(ctrl, itemLink, stackCount, sellerName, ...)
-        if not bridge.enabled then return end
-
-        if type(GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS) == "table" then
-            local list = GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.itemList
-                or GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.list
-                or GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS.parametricList
-            bridge._overlayAnchorControl = SafeGetTargetControl(list)
-        end
-
-        if type(itemLink) ~= "string" or not itemLink:find("|H") then
+        if not IsValidItemLink(itemLink) then
             bridge:_hideOverlay()
-            LogDebug("TH LayoutGuildStoreSearchResult: no valid itemLink")
             return
         end
-
-        ctrl._lgcmbLastKey = nil
-        local pendingInfo = ctrl._lgcmbPendingInfo
-        local effectiveStackCount = pendingInfo and pendingInfo.stackCount or stackCount
-        local listingPrice = pendingInfo and pendingInfo.listingPrice
-
-        if (type(listingPrice) ~= "number" or listingPrice <= 0) and type(itemLink) == "string" and itemLink:find("|H") then
-            local resolvedPrice, resolvedStackCount = bridge:_lookupTradingHouseListingPrice(itemLink, effectiveStackCount, sellerName)
-            if type(resolvedPrice) == "number" and resolvedPrice > 0 then
-                listingPrice = resolvedPrice
-            end
-            if type(resolvedStackCount) == "number" and resolvedStackCount > 0 then
-                effectiveStackCount = resolvedStackCount
-            end
-        end
-
-        bridge:_appendGamepadTooltipInfoByLink(ctrl, itemLink, effectiveStackCount, listingPrice, "guildstore")
-
-        LogDebug(string.format("TH layout: sc=%s price=%s seller=%s link=%s",
-            tostring(effectiveStackCount), tostring(listingPrice), tostring(sellerName), tostring(itemLink):sub(1, 30)))
+        local price, selectedCount = bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
+        control._lgcmbLastKey = nil
+        bridge:_appendGamepadTooltipInfoByLink(control, itemLink, selectedCount or stackCount, price, "guildstore")
     end)
-
-    tooltip._lgcmbTradingHouseLayoutHooked = true
-
     self._tradingHouseTooltipHooked = true
-    LogDebug("Hooked LayoutGuildStoreSearchResult on gamepad trading house tooltip")
     return true
 end
 
 function bridge:_scheduleTooltipPriceHookRetry()
-    if self._tooltipPriceHooked then
+    if self._tooltipHookRetryScheduled or (self._tooltipPriceHooked and self._craftingTooltipsHooked and self._tradingHouseTooltipHooked) then
         return
     end
-
-    if type(zo_callLater) == "function" then
-        LogTrace("Scheduling tooltip price hook retry in 2500ms")
-        zo_callLater(function()
-            LogTrace("Retrying tooltip price hook...")
-            bridge:_hookTooltipPrice()
-        end, 2500)
+    local attempts = self._tooltipHookRetryAttempts or 0
+    if attempts >= 6 then
+        return
     end
+    self._tooltipHookRetryAttempts = attempts + 1
+    self._tooltipHookRetryScheduled = true
+    zo_callLater(function()
+        bridge._tooltipHookRetryScheduled = false
+        bridge:_hookTooltipPrice()
+        bridge:_hookCraftingTooltips()
+        bridge:_hookTradingHouseTooltip()
+        bridge:_scheduleTooltipPriceHookRetry()
+    end, 2500)
 end
 
 function bridge:_initializeSlashCommands()
@@ -3616,14 +1767,7 @@ function bridge:_initializeSlashCommands()
         return
     end
 
-    if type(SLASH_COMMANDS) ~= "table" then
-        return
-    end
-
     local function PrintHelp()
-        if type(d) ~= "function" then
-            return
-        end
         d(string.format("[%s] /lgcmb status", MAJOR))
         d(string.format("[%s] /lgcmb on|off", MAJOR))
         d(string.format("[%s] /lgcmb debug on|off", MAJOR))
@@ -3691,11 +1835,8 @@ function bridge:_initializeSettingsPanel()
         return
     end
 
-    local lam = _G.LibAddonMenu2 or _G.LibAddonMenu
-    if type(lam) ~= "table" then
-        return
-    end
-    if type(lam.RegisterAddonPanel) ~= "function" or type(lam.RegisterOptionControls) ~= "function" then
+    local lam = LibAddonMenu2
+    if not lam then
         return
     end
 
@@ -3853,7 +1994,7 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
         kind = "action",
         label = label,
         callback = function()
-            SafeCallCallbackWithContext(callback, capture.contextControl)
+            RunExternalAction(callback)
         end,
     }
     LogTrace(string.format("Captured action: %s", tostring(label)))
@@ -3903,11 +2044,11 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
                                     label = childLabel,
                                     callback = function()
                                         if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-                                            SafeCallCallback(function()
+                                            RunExternalAction(function()
                                                 callback(not checked)
                                             end)
                                         else
-                                            SafeCallCallback(callback)
+                                            RunExternalAction(callback)
                                         end
                                     end,
                                 }
@@ -3929,7 +2070,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
         label = submenuLabel,
         entries = submenuActionEntries,
         callback = type(submenuCallback) == "function" and function()
-            SafeCallCallbackWithContext(submenuCallback, capture.contextControl)
+            RunExternalAction(submenuCallback)
         end or nil,
     }
     LogTrace(string.format("Captured submenu: %s (%d items)", submenuLabel, #submenuActionEntries))
@@ -3975,7 +2116,7 @@ function bridge:_beginCapture(lcm)
         return nil
     end
 
-    if type(lcm) == "table" and type(lcm.AddMenuItem) == "function" then
+    do
         capture.originals.LibAddMenuItem = lcm.AddMenuItem
         lcm.AddMenuItem = function(...)
             return _G.AddMenuItem(...)
@@ -3997,7 +2138,7 @@ function bridge:_endCapture(lcm, capture)
     _G.ShowMenu = capture.originals.ShowMenu
     _G.ClearMenu = capture.originals.ClearMenu
 
-    if type(lcm) == "table" and capture.originals.LibAddMenuItem then
+    if capture.originals.LibAddMenuItem then
         lcm.AddMenuItem = capture.originals.LibAddMenuItem
     end
 end
@@ -4006,262 +2147,43 @@ function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
     if self._isCapturing then
         return {}
     end
-
     self._isCapturing = true
     local capture = self:_beginCapture(lcm)
     capture.contextControl = inventorySlot
-    LogTrace("Context capture started")
     local originalGetSlotType = ZO_InventorySlot_GetType
-
-    local originalContextMenuMode = slotActions and slotActions.m_contextMenuMode
-
+    local originalContextMenuMode = slotActions.m_contextMenuMode
+    -- Capture temporarily replaces menu globals. Always restore them even if
+    -- an external builder, label, or visibility callback raises an error.
     local ok, err = pcall(function()
-        local early = tonumber(lcm.CATEGORY_EARLY)
-        local late = tonumber(lcm.CATEGORY_LATE)
-        if early == nil or late == nil then
-            return
+        ZO_InventorySlot_GetType = function(slot)
+            local slotType = originalGetSlotType(slot)
+            return slot == inventorySlot and bridge:_resolveNormalizedSlotType(slot, slotType) or slotType
         end
-        local contextMenuRegistry = lcm.contextMenuRegistry
-        local hasFireCallbacks = type(contextMenuRegistry) == "table" and type(contextMenuRegistry.FireCallbacks) == "function"
-        local summary, totalCallbacks = self:_summarizeContextRegistry()
-        LogTrace(string.format("Context registry callbacks: total=%d (%s)", tonumber(totalCallbacks or 0), tostring(summary)))
-        if type(ZO_InventorySlot_GetType) == "function" then
-            local slotType = ZO_InventorySlot_GetType(inventorySlot)
-            LogTrace(string.format("Slot type: %s", tostring(slotType)))
-        end
-
-        if type(originalGetSlotType) == "function" then
-            ZO_InventorySlot_GetType = function(slot)
-                local resolved = originalGetSlotType(slot)
-                if slot ~= inventorySlot then
-                    return resolved
-                end
-
-                local normalized = bridge:_resolveNormalizedSlotType(slot, resolved)
-                if normalized ~= resolved then
-                    LogTrace(string.format("Normalized slot type %s -> %s", tostring(resolved), tostring(normalized)))
-                    return normalized
-                end
-                return resolved
+        slotActions.m_contextMenuMode = true
+        local registry = self:_readContextMenuRegistry()
+        for category = lcm.CATEGORY_EARLY, lcm.CATEGORY_LATE do
+            -- Do not retry an empty or failed callback; side effects may have
+            -- happened already. Recover ESO's depth counter after an error.
+            local depth = registry:GetFireCallbackDepth()
+            local callbackOk, callbackErr = pcall(registry.FireCallbacks, registry, category, inventorySlot, slotActions)
+            if not callbackOk then
+                registry.fireCallbackDepth = depth
+                registry:Clean(category)
+                LogDebug("Context callback failed: " .. tostring(callbackErr))
             end
         end
-
-        if slotActions then
-            slotActions.m_contextMenuMode = true
-        end
-
-        if hasFireCallbacks then
-            LogTrace("Running callbacks via LibCustomMenu contextMenuRegistry:FireCallbacks")
-            for category = early, late do
-                local callbackOk, callbackErr = pcall(contextMenuRegistry.FireCallbacks, contextMenuRegistry, category, inventorySlot, slotActions)
-                if not callbackOk then
-                    LogDebug(callbackErr)
-                end
-            end
-        else
-            LogTrace("Running callbacks via internal callback cache (fallback mode)")
-            for category = early, late do
-                local callbacks = self._contextCallbacks[category]
-                if callbacks then
-                    for i = 1, #callbacks do
-                        local callbackData = callbacks[i]
-                        if type(callbackData) == "table" and type(callbackData.func) == "function" then
-                            local args = callbackData.args
-                            local callbackOk, callbackErr
-
-                            if args and #args > 0 then
-                                local callArgs = {}
-                                for argIndex = 1, #args do
-                                    callArgs[#callArgs + 1] = args[argIndex]
-                                end
-                                callArgs[#callArgs + 1] = inventorySlot
-                                callArgs[#callArgs + 1] = slotActions
-                                callbackOk, callbackErr = pcall(callbackData.func, unpackArgs(callArgs))
-                            else
-                                callbackOk, callbackErr = pcall(callbackData.func, inventorySlot, slotActions)
-                            end
-
-                            if not callbackOk then
-                                LogDebug(callbackErr)
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        -- Empty menus are valid; errors may follow side effects. Never replay.
     end)
-
-    if slotActions then
-        slotActions.m_contextMenuMode = originalContextMenuMode
-    end
-    if type(originalGetSlotType) == "function" then
-        ZO_InventorySlot_GetType = originalGetSlotType
-    end
-
+    slotActions.m_contextMenuMode = originalContextMenuMode
+    ZO_InventorySlot_GetType = originalGetSlotType
     self:_endCapture(lcm, capture)
     self._isCapturing = false
-
     if not ok then
         LogDebug(err)
     end
-
-    LogTrace(string.format("Context capture finished with %d entries", #capture.entries))
     return capture.entries
 end
 
-function bridge:_ensureSubmenuDialog()
-    if self._submenuDialogRegistered then
-        return true
-    end
-
-    if type(ZO_Dialogs_RegisterCustomDialog) ~= "function" then
-        return false
-    end
-
-    if type(GAMEPAD_DIALOGS) ~= "table" or GAMEPAD_DIALOGS.PARAMETRIC == nil then
-        return false
-    end
-
-    local dialogName = self._submenuDialogName or (MAJOR .. "_SubmenuDialog")
-    self._submenuDialogName = dialogName
-
-    ZO_Dialogs_RegisterCustomDialog(dialogName, {
-        canQueue = true,
-        blockDirectionalInput = true,
-        gamepadInfo = {
-            dialogType = GAMEPAD_DIALOGS.PARAMETRIC,
-            allowRightStickPassThrough = true,
-        },
-        title = {
-            text = function(dialog)
-                local data = dialog and dialog.data
-                local title = data and data.title
-                if type(title) == "string" and title ~= "" then
-                    return title
-                end
-                return SafeGetString(SI_GAMEPAD_SELECT_OPTION, "Select")
-            end,
-        },
-        mainText = {
-            text = function(dialog)
-                local data = dialog and dialog.data
-                local mainText = data and data.mainText
-                if type(mainText) == "string" then
-                    return mainText
-                end
-                return ""
-            end,
-        },
-        parametricList = {},
-        setup = function(dialog, data)
-            local parametricList = dialog.info and dialog.info.parametricList
-            if type(parametricList) ~= "table" then
-                return
-            end
-
-            if type(ZO_ClearNumericallyIndexedTable) == "function" then
-                ZO_ClearNumericallyIndexedTable(parametricList)
-            else
-                while #parametricList > 0 do
-                    table.remove(parametricList)
-                end
-            end
-
-            local submenuEntries = data and data.entries
-            if type(submenuEntries) ~= "table" then
-                submenuEntries = {}
-            end
-
-            for i = 1, #submenuEntries do
-                local submenuEntry = submenuEntries[i]
-                if type(submenuEntry) == "table" then
-                    local submenuLabel = submenuEntry.label or submenuEntry.name or submenuEntry[1]
-                    if type(submenuLabel) ~= "string" then
-                        submenuLabel = tostring(submenuLabel or "")
-                    end
-                    local submenuCallback = submenuEntry.callback or submenuEntry.func or submenuEntry[2]
-                    if submenuLabel ~= "" then
-                        local entryData
-                        if type(ZO_GamepadEntryData) == "table" and type(ZO_GamepadEntryData.New) == "function" then
-                            entryData = ZO_GamepadEntryData:New(submenuLabel)
-                            if type(entryData.SetIconTintOnSelection) == "function" then
-                                entryData:SetIconTintOnSelection(true)
-                            end
-                        else
-                            entryData = { text = submenuLabel }
-                        end
-
-                        if type(ZO_SharedGamepadEntry_OnSetup) == "function" then
-                            entryData.setup = ZO_SharedGamepadEntry_OnSetup
-                        end
-
-                        entryData._lgcmbCallback = type(submenuCallback) == "function" and submenuCallback or nil
-                        table.insert(parametricList, {
-                            template = "ZO_GamepadItemEntryTemplate",
-                            entryData = entryData,
-                        })
-                    end
-                end
-            end
-
-            if type(dialog.setupFunc) == "function" then
-                dialog:setupFunc()
-            end
-
-            if dialog.entryList and type(dialog.entryList.SetSelectedIndexWithoutAnimation) == "function" then
-                pcall(dialog.entryList.SetSelectedIndexWithoutAnimation, dialog.entryList, 1, true, false)
-            end
-        end,
-        buttons = {
-            {
-                keybind = "DIALOG_NEGATIVE",
-                text = SafeGetString(SI_DIALOG_CANCEL, "Cancel"),
-            },
-            {
-                keybind = "DIALOG_PRIMARY",
-                text = SafeGetString(SI_GAMEPAD_SELECT_OPTION, "Select"),
-                callback = function(dialog)
-                    local selected = dialog and dialog.entryList and SafeGetTargetData(dialog.entryList)
-                    local callback = selected and (selected._lgcmbCallback or (selected.entryData and selected.entryData._lgcmbCallback))
-                    ZO_Dialogs_ReleaseDialogOnButtonPress(dialogName)
-                    if type(callback) == "function" then
-                        SafeCallCallback(callback)
-                    end
-                end,
-            },
-        },
-    })
-
-    self._submenuDialogRegistered = true
-    return true
-end
-
-function bridge:_showSubmenuDialog(submenuLabel, submenuEntries, submenuCallback)
-    if type(submenuCallback) == "function" then
-        SafeCallCallback(submenuCallback)
-    end
-
-    if type(submenuEntries) ~= "table" or #submenuEntries == 0 then
-        return
-    end
-
-    if not self:_ensureSubmenuDialog() then
-        return
-    end
-
-    ZO_Dialogs_ShowDialog(self._submenuDialogName, {
-        title = submenuLabel,
-        entries = submenuEntries,
-    })
-end
-
 function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
-    if type(slotActions) ~= "table" or type(slotActions.AddSlotAction) ~= "function" then
-        return
-    end
-
     local knownNames = CollectExistingActionNames(slotActions)
     local addedCount = 0
 
@@ -4326,17 +2248,12 @@ function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
         return
     end
 
-    if type(slotActions) ~= "table" then
-        LogTrace("Skip inject: slotActions is invalid")
-        return
-    end
-
     if slotActions.m_contextMenuMode then
         LogTrace("Skip inject: already in context menu mode")
         return
     end
 
-    if type(IsInGamepadPreferredMode) == "function" and not IsInGamepadPreferredMode() then
+    if not IsInGamepadPreferredMode() then
         LogTrace("Skip inject: not in gamepad preferred mode")
         return
     end
@@ -4349,13 +2266,7 @@ function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
         end
     end
 
-    local lcm = LibCustomMenu
-    local capturedEntries = {}
-    if type(lcm) == "table" then
-        capturedEntries = self:_runContextCallbacks(lcm, inventorySlot, slotActions) or {}
-    else
-        LogTrace("LibCustomMenu missing; injecting native fallback actions only")
-    end
+    local capturedEntries = self:_runContextCallbacks(LibCustomMenu, inventorySlot, slotActions)
 
     if #capturedEntries == 0 then
         LogTrace("No LibCustomMenu entries captured for this slot")
@@ -4368,19 +2279,9 @@ function bridge:_hookDiscoverSlotActions()
     if self._discoverHooked then
         return
     end
-
-    if type(SecurePostHook) == "function" then
-        SecurePostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
-            bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
-        end)
-    elseif type(ZO_PostHook) == "function" then
-        ZO_PostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
-            bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
-        end)
-    else
-        return
-    end
-
+    SecurePostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
+        bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
+    end)
     self._discoverHooked = true
 end
 
@@ -4388,42 +2289,11 @@ function bridge:_hookRefreshKeybindStrip()
     if self._refreshHooked then
         return
     end
-
-    if type(ZO_ItemSlotActionsController) ~= "table" then
-        return
-    end
-
-    local hookInstalled = false
-
-    local function OnRefreshKeybindStrip(controller)
-        if not controller or type(controller) ~= "table" then
-            return
+    SecurePostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", function(controller)
+        if controller.inventorySlot then
+            bridge:_tryInjectGamepadContextActions(controller.inventorySlot, controller.slotActions)
         end
-
-        local slotActions = controller.slotActions
-        local inventorySlot = controller.inventorySlot
-
-        if not inventorySlot and type(GAMEPAD_INVENTORY) == "table" and GAMEPAD_INVENTORY.itemActions then
-            inventorySlot = GAMEPAD_INVENTORY.itemActions.inventorySlot
-        end
-
-        if inventorySlot and slotActions then
-            bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
-        end
-    end
-
-    if type(SecurePostHook) == "function" then
-        SecurePostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", OnRefreshKeybindStrip)
-        hookInstalled = true
-    elseif type(ZO_PostHook) == "function" then
-        ZO_PostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", OnRefreshKeybindStrip)
-        hookInstalled = true
-    end
-
-    if not hookInstalled then
-        return
-    end
-
+    end)
     self._refreshHooked = true
 end
 
@@ -4436,15 +2306,8 @@ function bridge:Initialize()
     self:_initializeSlashCommands()
     self:_initializeSettingsPanel()
 
-    local lcm = LibCustomMenu
-    if type(lcm) == "table" then
-        self:_wrapRegisterContextMenu(lcm)
-        self:_importExistingCallbacks(lcm)
-        self:_hookDiscoverSlotActions()
-        self:_hookRefreshKeybindStrip()
-    else
-        LogDebug("LibCustomMenu not found; tooltip/overlay features stay active, context bridge is idle")
-    end
+    self:_hookDiscoverSlotActions()
+    self:_hookRefreshKeybindStrip()
     
     -- Попытка подцепить тултипы
     local tooltipHookSuccess = self:_hookTooltipPrice()
@@ -4481,10 +2344,6 @@ function bridge:_registerPlayerActivatedHook()
         return
     end
 
-    if type(EVENT_MANAGER) ~= "table" or type(EVENT_MANAGER.RegisterForEvent) ~= "function" then
-        return
-    end
-
     EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
         local hooked = bridge:_hookTooltipPrice()
         if not hooked then
@@ -4492,9 +2351,7 @@ function bridge:_registerPlayerActivatedHook()
         end
         bridge:_hookCraftingTooltips()
         bridge:_hookTradingHouseTooltip()
-        if type(EVENT_MANAGER.UnregisterForEvent) == "function" then
-            EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
-        end
+        EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
     end)
 
     -- LayoutGuildStoreSearchResult is added to tooltip instances dynamically the first
@@ -4508,34 +2365,28 @@ function bridge:_registerPlayerActivatedHook()
     end)
 
     local TH_CLOSE_NS = MAJOR .. "_THClose"
-    if type(EVENT_CLOSE_TRADING_HOUSE) == "number" then
-        EVENT_MANAGER:RegisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE, function()
-            bridge:_hideOverlay()
-            LogTrace("Overlay hidden on EVENT_CLOSE_TRADING_HOUSE")
-        end)
-    end
+    EVENT_MANAGER:RegisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE, function()
+        bridge:_hideOverlay()
+        LogTrace("Overlay hidden on EVENT_CLOSE_TRADING_HOUSE")
+    end)
 
     local CRAFT_OPEN_NS = MAJOR .. "_CraftOpen"
-    if type(EVENT_CRAFTING_STATION_INTERACT) == "number" then
-        EVENT_MANAGER:RegisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT, function(_, craftSkill, sameStation, craftMode)
-            bridge._craftingStationActive = true
-            bridge._templateCraftingOverlayActive = false
-            bridge:_hookTooltipPrice()
-            bridge:_hookCraftingTooltips()
-            LogTrace(string.format("EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
-                tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
-        end)
-    end
+    EVENT_MANAGER:RegisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT, function(_, craftSkill, sameStation, craftMode)
+        bridge._craftingStationActive = true
+        bridge._templateCraftingOverlayActive = false
+        bridge:_hookTooltipPrice()
+        bridge:_hookCraftingTooltips()
+        LogTrace(string.format("EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
+            tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
+    end)
 
     local CRAFT_CLOSE_NS = MAJOR .. "_CraftClose"
-    if type(EVENT_END_CRAFTING_STATION_INTERACT) == "number" then
-        EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
-            bridge._craftingStationActive = false
-            bridge._templateCraftingOverlayActive = false
-            bridge:_hideOverlay()
-            LogTrace("Overlay hidden on EVENT_END_CRAFTING_STATION_INTERACT")
-        end)
-    end
+    EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
+        bridge._craftingStationActive = false
+        bridge._templateCraftingOverlayActive = false
+        bridge:_hideOverlay()
+        LogTrace("Overlay hidden on EVENT_END_CRAFTING_STATION_INTERACT")
+    end)
 
     self._playerActivatedHookRegistered = true
 end

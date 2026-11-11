@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.3
+- Target API 101051 after checking the published ESO UI contracts.
+- In-game testing completed by Azmail; no issues reported.
+- Remove speculative API names, alternate call signatures and redundant guards around guaranteed ESO APIs.
+- Use LibCustomMenu's own registry without a second callback cache; preserve exactly-once dispatch and capture cleanup.
+- Read recipe ingredient counts and required quantities from their documented APIs; use the selected smithing quantity, style and trait materials.
+- Resolve Trading House prices from the exact selected lot instead of scanning for similar item IDs.
+- Declare the current optional LibAddonMenu revision and TTC load ordering; retain operation without either optional addon.
+- Add AI disclosure, author information and dependency/API-source credits.
+
 ## 1.5.2
 - Execute menu actions once and log failures without retrying with guessed arguments.
 - Invalidate delayed overlay updates when the selection changes or the overlay is hidden.

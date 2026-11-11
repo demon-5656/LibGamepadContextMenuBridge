@@ -1,5 +1,7 @@
 # LibGamepadContextMenuBridge
 
+**AI disclosure:** AI was used for code generation, refactoring and documentation. Author: **Azmail**. See [credits](LibGamepadContextMenuBridge/CREDITS.md).
+
 Standalone ESO library addon repository.
 
 This library mirrors inventory actions registered via `LibCustomMenu:RegisterContextMenu(...)` into gamepad action lists.
@@ -10,7 +12,7 @@ It also includes optional quality-of-life additions for gamepad inventory users:
 - optional tooltip info block for TTC price, TTC detail summary, junk status, bound status, and vendor value
 
 ## How the bridge behaves
-1. Hooks `LibCustomMenu:RegisterContextMenu(...)` and stores context callbacks.
+1. Uses the context registry provided by the required `LibCustomMenu>=730`; it does not maintain a second callback cache.
 2. On gamepad item-action refresh, rebuilds custom context entries for the current slot.
 3. Converts supported entries to gamepad `slotActions`.
 4. Executes the original callback when a mirrored action is selected.
@@ -32,6 +34,16 @@ It also includes optional quality-of-life additions for gamepad inventory users:
 - `scripts/build_release.sh` - builds `.zip` (or `.tar.gz` fallback) release archive
 - `scripts/tests/regression.lua` - deterministic callback, overlay, dispatch, submenu, and material-estimate checks
 
+## Development Roadmap
+
+Документация перехода от полезного моста к востребованному инструменту для игроков и платформе для авторов:
+
+- [От «просто мод» к «мне это точно нужно»](docs/PRODUCT_STRATEGY.md) — ценность для игрока, приоритеты, этапы и первый backlog.
+- [Проект платформы и API](docs/PLATFORM_SPEC.md) — границы core, provider/context/action contracts и миграция без поломки legacy.
+- [Приёмка, пилот и выпуск](docs/ACCEPTANCE_AND_RELEASE.md) — игровые сценарии, критерии готовности, демонстрация пользы и публикация.
+
+Это планы и требования, а не список уже реализованных возможностей. Предлагаемый provider API пока отсутствует в 1.5.2; текущий способ подключения описан в [addon README](LibGamepadContextMenuBridge/README.md).
+
 ## Local Regression Checks
 From the repository root, run `lua scripts/tests/regression.lua`.
 These tests use explicit ESO/TTC stubs; they do not replace an in-game check.
@@ -40,8 +52,10 @@ Missing prices produce a partial/incomplete estimate without a crafted-value com
 
 ## Dependencies
 - Required: `LibCustomMenu>=730`
-- Optional: `LibAddonMenu-2.0` (settings panel)
+- Optional: `LibAddonMenu-2.0>=43` (settings panel)
 - Optional for price display: `TamrielTradeCentre`
+
+The manifest targets **API 101051**. Contracts are checked against the pinned ESO UI sources; see [API verification](docs/API_CONTRACTS_101051.md). In-game testing completed by Azmail; no issues reported.
 
 ## Install (manual)
 Copy the folder below into your ESO AddOns directory:

@@ -1,5 +1,7 @@
 # LibGamepadContextMenuBridge
 
+**AI disclosure:** AI was used for code generation, refactoring and documentation. Author: **Azmail**. See [credits](CREDITS.md).
+
 ESO library addon that mirrors inventory entries created via `LibCustomMenu:RegisterContextMenu(...)` into gamepad inventory action lists.
 
 ## Purpose
@@ -7,7 +9,7 @@ This library makes keyboard/mouse context actions available when playing in game
 It is designed for addons that already register inventory context actions through `LibCustomMenu`.
 
 ## How it works
-1. During load, the library wraps `LibCustomMenu:RegisterContextMenu(...)` and tracks registered callbacks.
+1. Uses `LibCustomMenu`'s own context registry without wrapping registration or keeping a duplicate callback cache.
 2. When a gamepad item action list is refreshed, it asks the `LibCustomMenu` registries to build context entries for the current slot.
 3. It converts supported context entries into gamepad `slotActions` entries.
 4. Pressing an injected action runs the original callback from the context menu entry.
@@ -46,7 +48,11 @@ end, LibCustomMenu.CATEGORY_LATE)
 
 ## Dependency requirements
 - `LibCustomMenu>=730`
-- Optional: `LibAddonMenu-2.0` (for settings panel)
+- Optional: `LibAddonMenu-2.0>=43` (for settings panel)
+- Optional: `TamrielTradeCentre` and its price data (for market prices).
+
+## Compatibility
+The manifest targets ESO API **101051**. API contracts were checked against the published ESO UI sources. In-game testing completed by Azmail; no issues reported. The addon remains beta.
 
 ## Settings and Debug
 - Addon panel: `Settings -> Addon Settings -> LibGamepadContextMenuBridge` (requires `LibAddonMenu-2.0`).
