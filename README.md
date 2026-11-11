@@ -55,7 +55,7 @@ Missing prices produce a partial/incomplete estimate without a crafted-value com
 - Optional: `LibAddonMenu-2.0>=43` (settings panel)
 - Optional for price display: `TamrielTradeCentre`
 
-The manifest targets **API 101051**. Contracts are checked against the pinned ESO UI sources; see [API verification](docs/API_CONTRACTS_101051.md). In-game testing completed by Azmail; no issues reported.
+The manifest targets **API 101051**. Contracts are checked against the pinned ESO UI sources; see [API verification](docs/API_CONTRACTS_101051.md).
 
 ## Install (manual)
 Copy the folder below into your ESO AddOns directory:

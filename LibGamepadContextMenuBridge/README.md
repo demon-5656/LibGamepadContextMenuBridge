@@ -52,7 +52,7 @@ end, LibCustomMenu.CATEGORY_LATE)
 - Optional: `TamrielTradeCentre` and its price data (for market prices).
 
 ## Compatibility
-The manifest targets ESO API **101051**. API contracts were checked against the published ESO UI sources. In-game testing completed by Azmail; no issues reported. The addon remains beta.
+The manifest targets ESO API **101051**. The addon remains beta. Version 1.5.4 fixes the native-tooltip startup error in 1.5.3.
 
 ## Settings and Debug
 - Addon panel: `Settings -> Addon Settings -> LibGamepadContextMenuBridge` (requires `LibAddonMenu-2.0`).

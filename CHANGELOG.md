@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.4
+- Fix startup failure `SecurePostHook: table expected, got userdata` introduced in 1.5.3.
+- Use `ZO_PostHook` for native inventory and Trading House tooltip controls; retain `SecurePostHook` on Lua class tables.
+- Model tooltip fixtures as real Lua userdata and enforce the table-only SecurePostHook contract in regression tests.
+
 ## 1.5.3
 - Target API 101051 after checking the published ESO UI contracts.
 - In-game testing completed by Azmail; no issues reported.

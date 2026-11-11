@@ -2,7 +2,7 @@
 
 **Author and maintainer:** Azmail.
 
-**AI disclosure:** AI was used to generate and refactor code and documentation. Development assistance was provided through Hermes Agent using an OpenAI model. In-game testing completed by Azmail; no issues reported.
+**AI disclosure:** AI was used to generate and refactor code and documentation. Development assistance was provided through Hermes Agent using an OpenAI model.
 
 ## External projects and resources
 

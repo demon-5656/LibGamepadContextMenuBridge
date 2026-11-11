@@ -298,7 +298,7 @@ end
 do
     local b = fresh()
     local hookCounts = {}
-    SecurePostHook = function(target, method, hook)
+    local function installHook(target, method, hook)
         check(type(target[method]) == "function", "hook target is not a verified fixture method: " .. method)
         hookCounts[target] = hookCounts[target] or {}
         hookCounts[target][method] = (hookCounts[target][method] or 0) + 1
@@ -309,11 +309,31 @@ do
             return result
         end
     end
+    SecurePostHook = function(target, method, hook)
+        assert(type(target) == "table", "bad argument #1 to 'SecurePostHook' (table expected, got " .. type(target) .. ")")
+        installHook(target, method, hook)
+    end
+    ZO_PostHook = installHook
     ZO_PostHookHandler = function(target, event, hook)
         target.handlers[event] = hook
     end
     local function tooltip()
-        return { handlers={}, LayoutBagItem=function() end, LayoutGuildStoreSearchResult=function() end }
+        -- ESO native controls are userdata, not Lua tables.
+        local control, meta
+        if newproxy then
+            control = newproxy(true)
+            meta = getmetatable(control)
+        else
+            -- Newer Lua has no newproxy: use a closed read-only file as userdata.
+            control = assert(io.open(source, "r"))
+            control:close()
+            meta = {}
+            debug.setmetatable(control, meta)
+        end
+        local fields = { handlers={}, LayoutBagItem=function() return "bag result" end,
+            LayoutGuildStoreSearchResult=function() return "store result" end }
+        meta.__index, meta.__newindex = fields, fields
+        return control
     end
     GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP = 11, 12, 13
     local left, right, movable = tooltip(), tooltip(), tooltip()
@@ -328,8 +348,22 @@ do
         check(tip == left and bag == 1 and slot == 8, "bag hook forwarded wrong parameters")
         bagCalls = bagCalls + 1
     end
-    left:LayoutBagItem(1, 8)
+    check(type(left) == "userdata", "tooltip fixture no longer models a native control")
+    check(left:LayoutBagItem(1, 8) == "bag result", "post-hook lost original layout return")
     check(bagCalls == 1,"bag overlay not called exactly once")
+    local storeCalls = 0
+    b._lookupTradingHouseListingPrice = function(_, link, count, seller)
+        check(link == "|H1:item:704|hlisting|h" and count == 4 and seller == "seller", "store hook lost listing identity")
+        return 80, 4
+    end
+    b._appendGamepadTooltipInfoByLink = function(_, tip, link, count, price, sourceName)
+        check(tip == right and count == 4 and price == 80 and sourceName == "guildstore", "store hook forwarded wrong context")
+        storeCalls = storeCalls + 1
+    end
+    check(b:_hookTradingHouseTooltip(), "native Trading House tooltip was not hooked")
+    check(b:_hookTradingHouseTooltip(), "Trading House hook retry failed")
+    check(right:LayoutGuildStoreSearchResult("|H1:item:704|hlisting|h", 4, "seller") == "store result", "store post-hook lost original return")
+    check(storeCalls == 1 and hookCounts[right].LayoutGuildStoreSearchResult == 1, "store hook duplicated or missing")
     b._overlayTooltipControl = right
     left.handlers.OnEffectivelyHidden(left)
     check(b._overlayTooltipControl == right,"unrelated tooltip hide invalidated current overlay")

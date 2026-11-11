@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 153
-local ADDON_VERSION = "1.5.3"
+local MINOR = 154
+local ADDON_VERSION = "1.5.4"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -1653,7 +1653,8 @@ function bridge:_hookTooltipPrice()
         if not tooltip then
             allHooked = false
         elseif not tooltip._lgcmbBagHooksInstalled then
-            SecurePostHook(tooltip, "LayoutBagItem", function(control, bagId, slotIndex)
+            -- Native tooltip controls are userdata; SecurePostHook only accepts tables.
+            ZO_PostHook(tooltip, "LayoutBagItem", function(control, bagId, slotIndex)
                 if bridge.enabled then
                     bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex, "bag")
                 end
@@ -1727,7 +1728,7 @@ function bridge:_hookTradingHouseTooltip()
     if not tooltip then
         return false
     end
-    SecurePostHook(tooltip, "LayoutGuildStoreSearchResult", function(control, itemLink, stackCount, sellerName)
+    ZO_PostHook(tooltip, "LayoutGuildStoreSearchResult", function(control, itemLink, stackCount, sellerName)
         if not bridge.enabled then
             return
         end

@@ -1,8 +1,8 @@
 ## Title: LibGamepadContextMenuBridge
 ## Author: Azmail
 ## APIVersion: 101051
-## Version: 1.5.3
-## AddOnVersion: 153
+## Version: 1.5.4
+## AddOnVersion: 154
 ## IsLibrary: true
 ## DependsOn: LibCustomMenu>=730
 ## OptionalDependsOn: LibAddonMenu-2.0>=43 TamrielTradeCentre
