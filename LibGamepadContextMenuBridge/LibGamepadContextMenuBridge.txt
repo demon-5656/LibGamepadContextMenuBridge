@@ -1,8 +1,8 @@
 ## Title: LibGamepadContextMenuBridge
 ## Author: Azmail
 ## APIVersion: 101048 101049
-## Version: 1.5.1
-## AddOnVersion: 151
+## Version: 1.5.2
+## AddOnVersion: 152
 ## IsLibrary: true
 ## DependsOn: LibCustomMenu>=730
 ## OptionalDependsOn: LibAddonMenu-2.0

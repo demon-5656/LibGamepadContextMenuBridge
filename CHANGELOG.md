@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.2
+- Execute menu actions once and log failures without retrying with guessed arguments.
+- Invalidate delayed overlay updates when the selection changes or the overlay is hidden.
+- Treat empty context menus as valid and avoid replaying builders through the raw registry.
+- Preserve independent submenu-parent click actions and pass boolean state to checkbox children.
+- Calculate material totals beyond the eight displayed rows; label missing-price estimates and omit incomplete crafted-value comparisons.
+- Add deterministic Lua regression checks for these five scenarios. In-game validation remains separate.
+
 ## 1.5.1
 - Reworked tooltip rendering to use a dedicated overlay window instead of injecting lines directly into native gamepad tooltips.
 - Added adaptive overlay sizing and placement per source (`bag`, `guildstore`, `furncraft`) with screen-bound clamping.

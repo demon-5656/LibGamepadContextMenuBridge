@@ -17,8 +17,8 @@ It also includes optional quality-of-life additions for gamepad inventory users:
 
 ## Which entries are mirrored
 - `AddCustomMenuItem(...)` actionable rows.
-- `AddCustomSubMenuItem(...)` parent rows.
-- Submenu children in a dedicated gamepad submenu dialog.
+- `AddCustomSubMenuItem(...)` parents with their own click callback, as independent actions.
+- Submenu children flattened into `Parent: Child` actions; selecting a child does not run the parent callback.
 - Entries in `LibCustomMenu` category order (`EARLY` to `LATE`).
 
 ## Which entries are skipped
@@ -30,6 +30,13 @@ It also includes optional quality-of-life additions for gamepad inventory users:
 ## Repository Layout
 - `LibGamepadContextMenuBridge/` - addon files for `Documents/Elder Scrolls Online/live/AddOns/`
 - `scripts/build_release.sh` - builds `.zip` (or `.tar.gz` fallback) release archive
+- `scripts/tests/regression.lua` - deterministic callback, overlay, dispatch, submenu, and material-estimate checks
+
+## Local Regression Checks
+From the repository root, run `lua scripts/tests/regression.lua`.
+These tests use explicit ESO/TTC stubs; they do not replace an in-game check.
+Crafting material totals include ingredients beyond the eight displayed detail rows.
+Missing prices produce a partial/incomplete estimate without a crafted-value comparison.
 
 ## Dependencies
 - Required: `LibCustomMenu>=730`

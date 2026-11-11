@@ -14,8 +14,8 @@ It is designed for addons that already register inventory context actions throug
 
 ## What will be shown in gamepad actions
 - Regular custom actions added with `AddCustomMenuItem(...)` that are actionable.
-- Submenu parents added with `AddCustomSubMenuItem(...)`.
-- Submenu children inside a dedicated gamepad submenu dialog.
+- Submenu parents with their own click callback, as independent actions.
+- Submenu children flattened into `Parent: Child` actions.
 - Entries in the same category execution order as `LibCustomMenu` (`EARLY` -> `NORMAL` -> `LATE`).
 
 ## What will NOT be shown
@@ -25,9 +25,11 @@ It is designed for addons that already register inventory context actions throug
 - Duplicate entries already present in the current gamepad action list.
 
 ## Submenu behavior
-- Submenu parent entries are injected as regular actions.
-- Activating a parent opens a gamepad list dialog that contains submenu children.
-- Selecting a child executes its original submenu callback.
+- A parent's click callback is injected as a separate action, including for an empty submenu.
+- Children appear directly in the gamepad action list as `Parent: Child`.
+- Selecting a child runs only its callback, not the parent's callback.
+- Checkbox children receive their new boolean state, while ordinary actions receive no arguments.
+- An action that throws is logged in debug mode and is not automatically repeated.
 
 ## Usage
 1. Install folder `LibGamepadContextMenuBridge` into `AddOns`.

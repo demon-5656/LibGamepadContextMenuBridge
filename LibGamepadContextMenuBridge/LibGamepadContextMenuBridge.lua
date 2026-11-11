@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 151
-local ADDON_VERSION = "1.5.1"
+local MINOR = 152
+local ADDON_VERSION = "1.5.2"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -138,24 +138,14 @@ local function SafeCallCallback(callback)
         return
     end
 
-    local ok = pcall(callback)
-    if ok then
-        return
+    local ok, err = pcall(callback)
+    if not ok then
+        LogDebug("Menu callback failed: " .. tostring(err))
     end
-
-    pcall(callback, nil)
 end
 
 local function SafeCallCallbackWithContext(callback, contextControl)
-    if type(callback) ~= "function" then
-        return
-    end
-
-    local ok = pcall(callback, contextControl)
-    if ok then
-        return
-    end
-
+    -- Ordinary menu actions use function(); never replay after an error.
     SafeCallCallback(callback)
 end
 
@@ -2063,9 +2053,12 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
 
     local totalCost = 0
     local knownCostCount = 0
+    local displayedCount = 0
+    local namedIngredientCount = 0
     local maxLines = 8
 
-    for i = 1, math.min(#ingredients, maxLines) do
+    -- Calculate every ingredient; the limit applies only to displayed rows.
+    for i = 1, #ingredients do
         local entry = ingredients[i]
         local qty = math.max(1, tonumber(entry.quantity) or 1)
         local link = entry.itemLink
@@ -2085,6 +2078,7 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
         if type(name) ~= "string" or name == "" then
             -- Skip unknown placeholder-like ingredients to avoid noisy fake entries.
         else
+            namedIngredientCount = namedIngredientCount + 1
             local costText = "n/a"
             if IsValidItemLink(link) then
                 local priceInfo = self:_getTtcPriceInfo(link)
@@ -2097,15 +2091,18 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
                 end
             end
 
-            lines[#lines + 1] = string.format("|c%s• %s x%d: %s|r", qualityHex, name, qty, costText)
+            if displayedCount < maxLines then
+                lines[#lines + 1] = string.format("|c%s• %s x%d: %s|r", qualityHex, name, qty, costText)
+                displayedCount = displayedCount + 1
+            end
         end
     end
 
-    if #ingredients > maxLines then
-        lines[#lines + 1] = string.format("|c8E8B68  ...and %d more mats|r", #ingredients - maxLines)
+    if namedIngredientCount > displayedCount then
+        lines[#lines + 1] = string.format("|c8E8B68  ...and %d more mats|r", namedIngredientCount - displayedCount)
     end
 
-    if knownCostCount > 0 then
+    if knownCostCount == #ingredients then
         local totalText = self:_formatCompactTooltipCurrency(totalCost) or tostring(math.floor(totalCost + 0.5))
         lines[#lines + 1] = "|cD7C98FMat total: " .. totalText .. "|r"
 
@@ -2121,6 +2118,15 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
             else
                 lines[#lines + 1] = "|cA0A070vs crafted: near zero|r"
             end
+        end
+    end
+
+    if knownCostCount < #ingredients then
+        if knownCostCount == 0 then
+            lines[#lines + 1] = "|cD7C98FMat estimate: incomplete (no pricing)|r"
+        else
+            local knownText = self:_formatCompactTooltipCurrency(totalCost) or tostring(math.floor(totalCost + 0.5))
+            lines[#lines + 1] = string.format("|cD7C98FMat estimate: partial (%d/%d priced; known subtotal %s)|r", knownCostCount, #ingredients, knownText)
         end
     end
 
@@ -2558,6 +2564,7 @@ function bridge:_getOverlayInsetsForSource(source)
 end
 
 function bridge:_hideOverlay()
+    self._overlayGeneration = (self._overlayGeneration or 0) + 1
     self._overlayAnchorControl = nil
     self._overlaySource = nil
     self._overlayTooltipControl = nil
@@ -2781,7 +2788,7 @@ function bridge:_buildCompactOverlayLines(lines, source)
     return lines
 end
 
-function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount)
+function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation)
     if type(zo_callLater) ~= "function" then
         return false
     end
@@ -2792,14 +2799,24 @@ function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCo
     end
 
     zo_callLater(function()
-        bridge:_showOverlayLines(lines, source, tooltipControl, retryCount + 1)
+        if bridge._overlayGeneration ~= generation then
+            return
+        end
+        bridge:_showOverlayLines(lines, source, tooltipControl, retryCount + 1, generation)
     end, 40)
 
     LogTrace("Overlay show delayed until tooltip anchor is ready")
     return true
 end
 
-function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount)
+function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, generation)
+    if generation == nil then
+        self._overlayGeneration = (self._overlayGeneration or 0) + 1
+        generation = self._overlayGeneration
+    elseif self._overlayGeneration ~= generation then
+        return
+    end
+
     if type(lines) ~= "table" or #lines == 0 then
         LogTrace("Overlay show skipped: no lines")
         self:_hideOverlay()
@@ -2851,7 +2868,7 @@ function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount)
 
     local anchored = self:_positionOverlay()
     if not anchored then
-        if self:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount) then
+        if self:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation) then
             return
         end
     end
@@ -3874,8 +3891,9 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
                     if itemTypeValue ~= MENU_ADD_OPTION_HEADER then
                         local childLabel = ResolveLabel(entry.label or entry.name or entry[1], capture.contextControl)
                         if childLabel and not IsDividerLabel(childLabel) then
+                            local checked
                             if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-                                local checked = EvaluateValue(entry.checked or false, ZO_Menu, capture.contextControl)
+                                checked = not not EvaluateValue(entry.checked or false, ZO_Menu, capture.contextControl)
                                 childLabel = string.format("[%s] %s", checked and "x" or " ", childLabel)
                             end
 
@@ -3884,7 +3902,13 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
                                 submenuActionEntries[#submenuActionEntries + 1] = {
                                     label = childLabel,
                                     callback = function()
-                                        SafeCallCallbackWithContext(callback, capture.contextControl)
+                                        if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
+                                            SafeCallCallback(function()
+                                                callback(not checked)
+                                            end)
+                                        else
+                                            SafeCallCallback(callback)
+                                        end
                                     end,
                                 }
                             end
@@ -3895,7 +3919,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
         end
     end
 
-    if #submenuActionEntries == 0 then
+    if #submenuActionEntries == 0 and type(submenuCallback) ~= "function" then
         LogTrace(string.format("Skipped submenu '%s': no visible actions", submenuLabel))
         return #capture.entries
     end
@@ -4066,10 +4090,7 @@ function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
             end
         end
 
-        if #capture.entries == 0 and totalCallbacks and totalCallbacks > 0 then
-            local invoked = self:_invokeRawRegistryHandlers(lcm, inventorySlot, slotActions)
-            LogTrace(string.format("Raw registry fallback invoked %d handlers", invoked))
-        end
+        -- Empty menus are valid; errors may follow side effects. Never replay.
     end)
 
     if slotActions then
@@ -4267,6 +4288,10 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
         local entry = entries[i]
         if type(entry) == "table" then
             if entry.kind == "submenu" then
+                -- Clicking the parent is a separate action, not child setup.
+                if type(entry.callback) == "function" then
+                    AddUniqueAction(entry.label, entry.callback)
+                end
                 local submenuEntries = entry.entries
                 if type(submenuEntries) == "table" and #submenuEntries > 0 then
                     for subIndex = 1, #submenuEntries do
