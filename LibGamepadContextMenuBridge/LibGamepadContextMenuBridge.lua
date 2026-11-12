@@ -30,8 +30,6 @@ bridge._formattedTooltipLineCache = bridge._formattedTooltipLineCache or {}
 bridge._tooltipTtcCacheSize = bridge._tooltipTtcCacheSize or 0
 bridge._formattedTooltipLineCacheSize = bridge._formattedTooltipLineCacheSize or 0
 bridge._overlayWindow = bridge._overlayWindow or nil
-bridge._craftingStationActive = bridge._craftingStationActive or false
-bridge._templateCraftingOverlayActive = bridge._templateCraftingOverlayActive or false
 
 local SAVED_VARS_NAME = MAJOR .. "_SavedVars"
 local SAVED_VARS_VERSION = 1
@@ -60,14 +58,6 @@ local DEFAULTS = {
     showJunkStatusInTooltip = true,
     showVendorPriceInTooltip = true,
 }
-
-
-local function TrimString(value)
-    if type(value) ~= "string" then
-        return ""
-    end
-    return (value:gsub("^%s+", ""):gsub("%s+$", ""))
-end
 
 local function GetDebugTimestamp()
     return tostring(GetTimeStamp())
@@ -209,7 +199,7 @@ local function CollectExistingActionNames(slotActions)
     return names
 end
 
-local function StampActionLabel(slotActions, label, callback)
+local function StampActionLabel(slotActions, label)
     -- ESO stores action name/callback at indices 1/2. Named aliases support
     -- third-party dialogs that consume the same action table.
     local entry = slotActions.m_slotActions[#slotActions.m_slotActions]
@@ -480,10 +470,6 @@ function bridge:_shouldShowVendorPriceInTooltip()
     return not not (not self.savedVars or self.savedVars.showVendorPriceInTooltip ~= false)
 end
 
-function bridge:_shouldShowTemplateCraftingOverlay()
-    return self._templateCraftingOverlayActive == true
-end
-
 function bridge:_getTtcPriceInfo(itemLink)
     -- TTC is optional; once loaded, use its documented public price provider.
     if not TamrielTradeCentrePrice or not HasItemLink(itemLink) then
@@ -492,20 +478,10 @@ function bridge:_getTtcPriceInfo(itemLink)
     return TamrielTradeCentrePrice:GetPriceInfo(itemLink)
 end
 
-function bridge:_getTtcPriceTableUpdatedText()
-    if TamrielTradeCentrePrice then
-        return TamrielTradeCentrePrice:GetPriceTableUpdatedDateString()
-    end
-end
-
-function bridge:_formatTtcCurrency(value)
+function bridge:_formatTooltipInfoCurrency(value)
     if type(value) == "number" then
         return ZO_CurrencyControl_FormatCurrency(math.floor(value + 0.5), true)
     end
-end
-
-function bridge:_formatTooltipInfoCurrency(value)
-    return self:_formatTtcCurrency(value)
 end
 
 function bridge:_formatCompactTooltipCurrency(value)
@@ -635,10 +611,7 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
 
     local stackCount = GetSlotStackSize(bagId, slotIndex)
     if itemLink then
-        local linkLines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false)
-        for i = 1, #linkLines do
-            lines[#lines + 1] = linkLines[i]
-        end
+        ZO_CombineNumericallyIndexedTables(lines, self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false))
     end
 
     local junkStatus = self:_getJunkStatusText(bagId, slotIndex)
@@ -669,12 +642,7 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
     end
 
     if self:_shouldShowTtcTooltipPrice() then
-        local ttcLines = self:_getCachedTtcTooltipLines(itemLink)
-        if type(ttcLines) == "table" then
-            for i = 1, #ttcLines do
-                lines[#lines + 1] = ttcLines[i]
-            end
-        end
+        ZO_CombineNumericallyIndexedTables(lines, self:_getCachedTtcTooltipLines(itemLink))
 
         if type(stackCount) == "number" and stackCount > 1 then
             local priceInfo = self:_getTtcPriceInfo(itemLink)
@@ -714,12 +682,7 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
     end
 
     if source == "furncraft" and type(craftContext) == "table" then
-        local craftLines = self:_buildCraftMaterialCostLines(itemLink, craftContext)
-        if type(craftLines) == "table" then
-            for i = 1, #craftLines do
-                lines[#lines + 1] = craftLines[i]
-            end
-        end
+        ZO_CombineNumericallyIndexedTables(lines, self:_buildCraftMaterialCostLines(itemLink, craftContext))
     end
 
     if includeVendor and self:_shouldShowVendorPriceInTooltip() then
@@ -735,35 +698,11 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
     return lines
 end
 
-local function ClampColorByte(value)
-    value = tonumber(value) or 1
-    if value < 0 then value = 0 end
-    if value > 1 then value = 1 end
-    return math.floor(value * 255 + 0.5)
-end
-
-local function RgbToHex(r, g, b)
-    return string.format("%02X%02X%02X", ClampColorByte(r), ClampColorByte(g), ClampColorByte(b))
-end
-
-local function FirstPositiveNumber(...)
-    local count = select("#", ...)
-    for i = 1, count do
-        local v = select(i, ...)
-        if type(v) == "number" and v > 0 then
-            return v
-        end
-    end
-    return nil
-end
-
 function bridge:_getItemLinkQualityHex(itemLink)
     if not HasItemLink(itemLink) then
         return "B8B29A"
     end
-    local quality = GetItemLinkDisplayQuality(itemLink)
-    local r, g, b = GetInterfaceColor(INTERFACE_COLOR_TYPE_ITEM_QUALITY_COLORS, quality)
-    return string.format("%02X%02X%02X", math.floor(r * 255 + 0.5), math.floor(g * 255 + 0.5), math.floor(b * 255 + 0.5))
+    return GetItemQualityColor(GetItemLinkDisplayQuality(itemLink)):ToHex()
 end
 
 function bridge:_collectRecipeIngredients(recipeListIndex, recipeIndex)
@@ -1426,29 +1365,6 @@ local function ParseCompactOverlayInfo(lines)
     return info
 end
 
-local function BuildCompactMinAvgMaxLine(text)
-    if not text then
-        return nil
-    end
-
-    return string.format("|c9F9780Min/Avg/Max: %s|r", text)
-end
-
-local function BuildCompactVersusTtcLine(text)
-    if not text then
-        return nil
-    end
-
-    local prefix = "|cA0A070"
-    if text:find("cheaper") or text:find("дешевле") then
-        prefix = "|c6AB87A"
-    elseif text:find("overpriced") or text:find("дороже") then
-        prefix = "|cD46A6A"
-    end
-
-    return string.format("%svs TTC: %s|r", prefix, text)
-end
-
 local function AppendIfValue(lines, value)
     if value then
         lines[#lines + 1] = value
@@ -1459,7 +1375,7 @@ local function BuildCompactOverlayBaseLines(info)
     local compact = {}
 
     AppendIfValue(compact, info.ttc and string.format("|cD8C06ATTC: %s|r", info.ttc) or nil)
-    AppendIfValue(compact, BuildCompactMinAvgMaxLine(info.minAvgMax))
+    AppendIfValue(compact, info.minAvgMax and FormatTooltipLine("Min/Avg/Max: " .. info.minAvgMax))
     AppendIfValue(compact, info.stackTotal and string.format("|cD8C06ATTC x%s|r", info.stackTotal:sub(2)) or nil)
 
     return compact
@@ -1476,21 +1392,12 @@ function bridge:_buildCompactOverlayLines(lines, source)
 
     local info = ParseCompactOverlayInfo(lines)
 
-    if source == "bag" then
-        local compact = BuildCompactOverlayBaseLines(info)
-
-        AppendIfValue(compact, info.vendor and string.format("|cC9B36BVendor: %s|r", info.vendor) or nil)
-        AppendIfValue(compact, info.junk == "Yes" and "|cB088D9Junk: Yes|r" or nil)
-        AppendIfValue(compact, BuildCompactVersusTtcLine(info.versusTtc))
-
-        if #compact > 0 then
-            return compact
-        end
-    end
-
     local compact = BuildCompactOverlayBaseLines(info)
     AppendIfValue(compact, info.vendor and string.format("|cC9B36BVendor: %s|r", info.vendor) or nil)
-    AppendIfValue(compact, BuildCompactVersusTtcLine(info.versusTtc))
+    if source == "bag" then
+        AppendIfValue(compact, info.junk == "Yes" and "|cB088D9Junk: Yes|r" or nil)
+    end
+    AppendIfValue(compact, info.versusTtc and FormatTooltipLine("vs TTC: " .. info.versusTtc))
 
     if #compact > 0 then
         return compact
@@ -1700,11 +1607,9 @@ function bridge:_hookCraftingTooltips()
             return
         end
         if control:IsControlHidden() or not HasItemLink(itemLink) then
-            bridge._templateCraftingOverlayActive = false
             bridge:_hideOverlay()
             return
         end
-        bridge._templateCraftingOverlayActive = true
         bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, nil, nil, "furncraft", context)
     end
     SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip", function(creation, pattern, material, quantity, styleId, trait)
@@ -1717,7 +1622,6 @@ function bridge:_hookCraftingTooltips()
     SecurePostHook(ZO_GamepadProvisioner, "RefreshRecipeDetails", function(provisioner, selectedData)
         if not bridge:_canUseOverlay() then return end
         if not selectedData then
-            bridge._templateCraftingOverlayActive = false
             bridge:_hideOverlay()
             return
         end
@@ -1805,7 +1709,7 @@ function bridge:_initializeSlashCommands()
     end
 
     SLASH_COMMANDS["/lgcmb"] = function(text)
-        local cmd = string.lower(TrimString(text or ""))
+        local cmd = string.lower(zo_strtrim(text or ""))
         if cmd == "" or cmd == "help" then
             PrintHelp()
             return
@@ -2122,9 +2026,7 @@ function bridge:_beginCapture(lcm)
         return bridge:_captureMenuEntry(capture, mytext, myfunction, itemType, enabled)
     end
 
-    _G.AddCustomMenuItem = function(mytext, myfunction, itemType, myFont, normalColor, highlightColor, itemYPad, horizontalAlignment, isHighlighted, onEnter, onExit, enabled)
-        return bridge:_captureMenuEntry(capture, mytext, myfunction, itemType, enabled)
-    end
+    _G.AddCustomMenuItem = _G.AddMenuItem
 
     _G.AddCustomSubMenuItem = function(mytext, entries, myfont, normalColor, highlightColor, itemYPad, callback)
         return bridge:_captureSubMenuEntries(capture, mytext, entries, callback)
@@ -2227,7 +2129,7 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
         local actionName = bridge:_ensureActionStringId(label)
         -- Keep this nil for compatibility with gamepad action dialogs that derive labels from raw action metadata.
         slotActions:AddSlotAction(actionName, callback, nil)
-        StampActionLabel(slotActions, label, callback)
+        StampActionLabel(slotActions, label)
         addedCount = addedCount + 1
     end
 
@@ -2353,8 +2255,6 @@ function bridge:_stopOverlayRuntime()
     self._tooltipHookRetryGeneration = (self._tooltipHookRetryGeneration or 0) + 1
     self._tooltipHookRetryScheduled = false
     self._tooltipHookRetryAttempts = 0
-    self._craftingStationActive = false
-    self._templateCraftingOverlayActive = false
     self:_hideOverlay()
 end
 
@@ -2370,13 +2270,9 @@ function bridge:_registerContextEvents()
     end
     local function OnCraftingOpen()
         if not bridge:_canUseOverlay() then return end
-        bridge._craftingStationActive = true
-        bridge._templateCraftingOverlayActive = false
         bridge:_hookCraftingTooltips()
         EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
             EVENT_MANAGER:UnregisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT)
-            bridge._craftingStationActive = false
-            bridge._templateCraftingOverlayActive = false
             bridge:_hideOverlay()
         end)
     end

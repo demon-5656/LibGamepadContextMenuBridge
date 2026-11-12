@@ -56,6 +56,17 @@ local function fresh()
         if format == SI_TOOLTIP_ITEM_NAME then return (value:gsub("%^.*$", "")) end
         return value
     end
+    -- Contracts read in localization.lua and zo_tableutils.lua (API 101051).
+    zo_strtrim = function(value) return (value:gsub("^%s*(.-)%s*$", "%1")) end
+    ZO_CombineNumericallyIndexedTables = function(dest, ...)
+        local counter = #dest
+        for i = 1, select("#", ...) do
+            for _, value in ipairs(select(i, ...)) do
+                counter = counter + 1
+                dest[counter] = value
+            end
+        end
+    end
     ZO_Menu = {}
     GetTimeStamp = function() return 123456 end
     d = function() end
@@ -446,8 +457,9 @@ do
     ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,{recipeListIndex=2,recipeIndex=3})
     check(#shown == 2 and shown[2].tip == provisioner.resultTooltip.tip and shown[2].context.recipeIndex == 3,
         "provisioner hook guessed recipe/tooltip instead of native selectedData")
+    b._overlayTooltipControl = provisioner.resultTooltip.tip
     ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,nil)
-    check(not b._templateCraftingOverlayActive,"cleared recipe selection kept crafting overlay active")
+    check(b._overlayTooltipControl == nil,"cleared recipe selection kept crafting overlay active")
     local alchemy = {tooltip=resultControl(),IsCraftable=function() return true end,GetResultItemLink=function() return "|H1:item:702|hpotion|h" end}
     local enchanting = {resultTooltip=resultControl(),IsCraftable=function() return true end,GetResultItemLink=function() return "|H1:item:703|hglyph|h" end}
     ZO_GamepadAlchemy.UpdateTooltip(alchemy)
@@ -570,9 +582,10 @@ do
     EVENT_MANAGER:Fire(EVENT_CLOSE_TRADING_HOUSE)
     check(EVENT_MANAGER:Count(EVENT_CLOSE_TRADING_HOUSE) == 0,"store close listener survived close")
     EVENT_MANAGER:Fire(EVENT_CRAFTING_STATION_INTERACT)
-    check(b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"crafting lifecycle did not start")
+    check(EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"crafting lifecycle did not start")
+    b._overlayTooltipControl = {}
     EVENT_MANAGER:Fire(EVENT_END_CRAFTING_STATION_INTERACT)
-    check(not b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 0,"crafting lifecycle did not stop")
+    check(b._overlayTooltipControl == nil and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 0,"crafting lifecycle did not stop")
     b:SetShowTtcPriceInTooltip(false);b:SetShowJunkStatusInTooltip(false);b:SetShowVendorPriceInTooltip(false)
     check(EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 0 and EVENT_MANAGER:Count(EVENT_CRAFTING_STATION_INTERACT) == 0,"disabled overlay retained context events")
     b:SetShowTtcPriceInTooltip(true)
@@ -582,7 +595,7 @@ do
     GetCraftingInteractionType = function() return 1 end
     b:SetEnabled(true)
     check(installs._hookDiscoverSlotActions == 1 and EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 1,"re-enable duplicated hooks or lost events")
-    check(b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"re-enable at open station lost close listener")
+    check(EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"re-enable at open station lost close listener")
     EVENT_MANAGER:Fire(EVENT_END_CRAFTING_STATION_INTERACT)
     GetCraftingInteractionType = function() return 0 end
     b:SetEnabled(false)
@@ -634,4 +647,77 @@ do
     check(text:find("Ore x1",1,true) and not text:find("^",1,true),"item name bypassed native grammar formatter")
     print("PASS native item-link helpers")
 end
-print("PASS all 13 regression groups (" .. checks .. " assertions)")
+-- 14. Compact rendering preserves order, colours and fallback behaviour.
+do
+    local b = fresh()
+    local lines = { "vs TTC: +5 overpriced", "Junk: Yes", "Vendor: 7", "TTC x3: 30", "Min/Avg/Max: 5 / 10 / 15", "TTC: 10" }
+    local expected = {
+        "|cD8C06ATTC: 10|r", "|c9F9780Min/Avg/Max: 5 / 10 / 15|r", "|cD8C06ATTC x3 30|r",
+        "|cC9B36BVendor: 7|r", "|cB088D9Junk: Yes|r", "|cD46A6Avs TTC: +5 overpriced|r",
+    }
+    check(table.concat(b:_buildCompactOverlayLines(lines, "bag"), "\n") == table.concat(expected, "\n"), "bag compact output changed")
+    table.remove(expected, 5)
+    check(table.concat(b:_buildCompactOverlayLines(lines, "guildstore"), "\n") == table.concat(expected, "\n"), "trading compact output changed")
+    check(b:_buildCompactOverlayLines(lines, "furncraft") == lines, "crafting material lines changed")
+    for _, case in ipairs({
+        { "vs TTC: -5 cheaper", "|c6AB87Avs TTC: -5 cheaper|r" },
+        { "vs TTC: fair", "|cA0A070vs TTC: fair|r" },
+        { "Vendor: 7", "|cC9B36BVendor: 7|r" },
+    }) do
+        check(b:_buildCompactOverlayLines({case[1]}, "bag")[1] == case[2], "compact colour changed")
+    end
+    local fallback = { "unknown line", "Junk: No" }
+    check(b:_buildCompactOverlayLines(fallback, "bag") == fallback, "unrecognised-only overlay lost fallback")
+    check(b:_buildCompactOverlayLines(nil, "bag") == nil, "nil overlay changed")
+    local empty = {}
+    check(b:_buildCompactOverlayLines(empty, "bag") == empty, "empty overlay changed")
+    print("PASS compact output preservation")
+end
+-- 15. Native helpers preserve command input, item colour, line order and currency.
+do
+    local b = fresh()
+    SLASH_COMMANDS = {}
+    local trims, trim = 0, zo_strtrim
+    zo_strtrim = function(value) trims = trims + 1; return trim(value) end
+    b:_initializeSlashCommands()
+    SLASH_COMMANDS["/lgcmb"](" \tOFF\n ")
+    check(not b.enabled and trims == 1, "slash command did not use native trim")
+    SLASH_COMMANDS["/lgcmb"](" ON ")
+    check(b.enabled and trims == 2, "trim changed command case handling")
+    SLASH_COMMANDS["/lgcmb"](nil)
+    check(trims == 3, "nil slash text changed help handling")
+    local link, colourCalls = "|H1:item:42:|hItem|h", 0
+    GetItemLinkDisplayQuality = function(value) check(value == link, "wrong quality item"); return 4 end
+    GetItemQualityColor = function(quality)
+        check(quality == 4, "wrong native colour quality")
+        return { ToHex = function() colourCalls = colourCalls + 1; return "00aaff" end }
+    end
+    GetInterfaceColor = function() error("manual colour conversion should not be used") end
+    check(b:_getItemLinkQualityHex(link) == "00aaff" and colourCalls == 1, "native quality colour not used once")
+    check(b:_getItemLinkQualityHex(nil) == "B8B29A" and colourCalls == 1, "invalid colour fallback changed")
+    b._isBoundItem = function() return false end
+    b._getTtcPriceInfo = function() return {SuggestedPrice=10} end
+    local craftLines = {"Mat total: 42"}
+    b._buildCraftMaterialCostLines = function() return craftLines end
+    ZO_CurrencyControl_FormatCurrency = function(value, short)
+        check(short == true, "currency format mode changed")
+        return "gold:" .. value
+    end
+    GetItemLinkValue = function() return 4 end
+    local lines = b:_buildTooltipInfoLinesByLink(link, 2, 30, true, {}, "furncraft")
+    check(table.concat(lines, "|") == "TTC: gold:10|TTC x2: gold:20|vs TTC: +5 overpriced|Mat total: 42|Vendor: gold:4", "native append changed line order")
+    check(#craftLines == 1 and craftLines[1] == "Mat total: 42", "native append mutated material source")
+    local cached = b:_getCachedTtcTooltipLines(link)
+    check(#cached == 1 and cached[1] == "TTC: gold:10", "native append mutated cached source")
+    GetItemLink, GetSlotStackSize = function() return link end, function() return 2 end
+    IsItemJunk, CanItemBeMarkedAsJunk = function() return false end, function() return true end
+    GetItemSellValueWithBonuses = function() return 4 end
+    check(table.concat(b:_buildTooltipInfoLines(1, 1), "|") == "TTC: gold:10|TTC x2: gold:20|Junk: No|Vendor: gold:4", "bag native append changed output")
+    check(b:_formatTooltipInfoCurrency(nil) == nil, "unknown currency fabricated")
+    check(b:_formatTooltipInfoCurrency(10.6) == "gold:11", "currency rounding changed")
+    for _, case in ipairs({{999,"999"},{1000,"1к"},{1500,"1.5к"},{10000,"10к"},{1000000,"1кк"}}) do
+        check(b:_formatCompactTooltipCurrency(case[1]) == case[2], "compact currency semantics changed")
+    end
+    print("PASS native utility refactor")
+end
+print("PASS all 15 regression groups (" .. checks .. " assertions)")

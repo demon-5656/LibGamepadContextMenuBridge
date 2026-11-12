@@ -1,6 +1,8 @@
 # Changelog
 
 ## 1.5.5
+- Use native `zo_strtrim`, cached `GetItemQualityColor(...):ToHex()` and `ZO_CombineNumericallyIndexedTables` instead of custom trim/RGB conversion and repeated array-copy loops.
+- Remove unused internal helpers, a currency alias and write-only crafting flags; share the menu-capture adapter and compact overlay colour formatting without changing output order.
 - Remove all `pcall` calls and the action-error suppression wrapper. Action and menu-builder errors now propagate instead of depending on debug logging.
 - Retain one `xpcall` solely to restore temporary menu globals and callback depth before rethrowing the original traceback. Failed builders are never retried.
 - Correct optional dependency declarations to names only; retain `LibCustomMenu>=730` as the required supported version floor. Recheck Live API 101051 separately from PTS API 101052.
