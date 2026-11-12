@@ -1,112 +1,84 @@
-# Проверка контрактов ESO API 101051
+# Контракты ESO API 101051
 
-## Изменения 1.5.5
+**1.5.5 — development; игровая приёмка NOT RUN.** Ниже описаны контракты первоисточников, реализованные исправления и локальные проверки. Локальный PASS не является проверкой в ESO.
 
-Удалены все вызовы `pcall` и обёртка подавления ошибок действий. Ошибки действий и строителей меню больше не зависят от debug-лога. Единственный `xpcall` обеспечивает восстановление подменённых menu globals, context mode и глубины callback registry, после чего ошибка обязательно выбрасывается повторно с исходным `debug.traceback`. Повторного исполнения и выдачи частичного меню после ошибки нет.
+## Источники и границы
 
-Повторная сетевая проверка: 12 ноября 2026 года. Версия аддона: **1.5.5**. Ветка `live` всё ещё указывает на `f819c808d57e237707c76e7b52518e2589c9e191`, её документация — **101051**; заголовок документации ветки `pts` — **101052**. PTS не добавлен в manifest как проверенная Live-совместимость.
+Проверка пяти reviews от 12 ноября 2026 года использовала ESO UI `live`, commit `f819c808d57e237707c76e7b52518e2589c9e191`; заголовок `ESOUIDocumentation.txt` — **101051**. PTS 101052 не заявляется как проверенная совместимость.
 
-## Источники
+Первичные тексты зависимостей прочитаны в локальной установке: LibCustomMenu **7.3.0 / AddOnVersion 730**, LibAddonMenu-2.0 **2.0 r43**, TTC **4.27.281.39281**. Это проверенные тексты, не утверждение о свежем скачивании архивов или последних опубликованных версиях. Полные отчёты и probes хранятся вне Git.
 
-- ESO UI `live`, закреплённый commit `f819c808d57e237707c76e7b52518e2589c9e191`:
-  https://github.com/esoui/esoui/tree/f819c808d57e237707c76e7b52518e2589c9e191
-- Документация API: `ESOUIDocumentation.txt` в том же commit, заголовок **101051**.
-- Оригинальные архивы ESOUI: LibCustomMenu **7.3.0 / 730**, LibAddonMenu-2.0 **2.0 r43**, Tamriel Trade Centre **4.27.281.39281**.
-- Правила публикации: https://www.esoui.com/forums/showthread.php?t=9
-- AI disclosure, credits и требования к зависимостям: https://www.esoui.com/forums/showthread.php?t=10790
-- Разъяснение зависимости/версии автором code65536, сообщение №2: https://www.esoui.com/forums/showthread.php?t=11595
-- PTS для сравнения: https://raw.githubusercontent.com/esoui/esoui/pts/ESOUIDocumentation.txt
+Точные файлы native source ниже относятся к этому SHA. Их корень: `esoui/` в репозитории `esoui/esoui` на GitHub. C++ VM здесь не исполнялась; экспортированный API и Lua call sites не доказывают поведение всех overloads.
 
-Архивы и извлечённые текстовые источники использованы для чтения контрактов, а не как исполняемый игровой стенд. Рабочие материалы проверки находятся вне репозитория.
+## Меню и выполнение действий
 
-В официальном RSS `https://www.elderscrollsonline.com/en-us/rss/newspatcher` на момент проверки опубликованы live-заметки **Update 51 Incremental 2** (9 ноября 2026) и отдельно **PTS v12.2.2**. PTS не принимался за live-целевой API.
-
-## Исправленные контракты
-
-| Участок | Проверенный контракт и изменение |
+| Область | Подтверждённый контракт / граница adapter |
 |---|---|
-| Время и строки | `GetTimeStamp()`, `GetString(...)`, `ZO_CreateStringId(...)` — штатные API; удалены проверки их существования, `pcall` и запасные способы вызова. |
-| Меню LibCustomMenu | Используется `contextMenuRegistry:FireCallbacks(category, inventorySlot, slotActions)`. Категории — константы зависимости. Удалены повторный кэш регистраций и обход внутреннего реестра для повторного запуска. Пустое меню и ошибка не служат причиной повтора. |
-| Ошибка строителя меню | В `ZO_CallbackObjectMixin:FireCallbacks` глубина увеличивается до внешнего callback. При исключении восстанавливается исходная глубина и выполняется `Clean(category)`; временно подменённые menu globals и context mode восстанавливаются отдельно. |
-| Действия предмета | `ZO_InventorySlotActions:AddSlotAction` получает string ID; штатные поля `m_slotActions` хранят имя/функцию в индексах 1/2. Нет перебора выдуманных вариантов полей. |
-| Типы списков | Parametric gamepad-списки используют `GetTargetData()`, но торговый BrowseResults наследует **ZO_SortFilterList:GetSelectedData()**. Применяется метод фактического класса, а не общий перебор имён; старые `SafeGetTargetData` и рекурсивные резолверы удалены за отсутствием оставшихся вызовов. |
-| Рецепты | `GetRecipeInfo(list, recipe)` возвращает количество видов ингредиентов **третьим** значением. `GetRecipeIngredientRequiredQuantity(list, recipe, ingredient)` — необходимое количество. `GetCurrentRecipeIngredientCount` — запас у игрока, а не требуемое количество или число видов. |
-| Поиск рецепта по результату | `GetRecipeInfoFromItemId(itemId)` возвращает тип станции и nullable-индексы рецепта. Убраны перебор всех рецептов и чтение произвольных вложенных UI-таблиц. |
-| Smithing | Количество материала берётся из аргументов `ZO_GamepadSmithingCreation:SetupResultTooltip`, которые штатный UI передаёт в `LayoutPendingSmithingItem`, а не из другого tier, собственного запаса или значения по умолчанию `1`. Материал стиля и trait учитываются отдельно через `GetItemStyleMaterialLink` и `GetSmithingTraitItemLink`. |
-| TTC | Используется `TamrielTradeCentrePrice:GetPriceInfo(itemLink)` и нормализованный объект, который возвращает TTC. Нет перебора альтернативных providers и способов вызова. Отсутствие TTC/его данных по-прежнему допустимо. |
-| Торговый дом | Цена — `purchasePrice` текущего выбранного лота через `GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS:GetSelectedData()`. Проверяются точные itemLink, stackCount и sellerName; для guild-specific позиции ссылка получается по её собственному slotIndex, как в штатном `UpdateItemSelectedTooltip`. Нет поиска похожего item ID и возврата цены другого лота. |
-| Gamepad crafting hooks | `ZO_GamepadSmithingCreation:SetupResultTooltip`, `ZO_GamepadProvisioner:RefreshRecipeDetails(selectedData)`, `ZO_GamepadAlchemy:UpdateTooltip` и `ZO_GamepadEnchanting:UpdateTooltip`. Используются реальные instance-owned `resultTooltip.tip` / `tooltip.tip`; не keyboard-классы, произвольные tooltip pools или несуществующий `LayoutFurnishingCraftingResult`. |
-| Геометрия tooltip | `ZO_Tooltip:Initialize` примешивает методы к native control; `GAMEPAD_TOOLTIPS:GetTooltip` возвращает этот control. Используются его реальные методы геометрии и `IsControlHidden`, а не предположения о plain Lua object. |
-| Зависимости | Required: `LibCustomMenu>=730` — сохранённая поддерживаемая нижняя граница, а не утверждение о первой версии появления каждого API. Optional: только `LibAddonMenu-2.0 TamrielTradeCentre`, без числовых сравнений. |
-| Item links | `GetLinkType(string)` и штатная константа `ITEM_LINK_TYPE` определяют тип ссылки; `GetItemLinkItemId(string)` возвращает ID. Сохраняется nil/type-граница входных данных, но нет собственного разбора строк ссылки. `HasItemLink` — короткая nil-safe граница над `GetLinkType`, не полная проверка существования предмета. |
-| Названия материалов | `zo_strformat(SI_TOOLTIP_ITEM_NAME, name)`, как в штатном `rewards_manager.lua`, вместо ручного удаления грамматических суффиксов. |
+| Registry | `LibCustomMenu:RegisterContextMenu(callback, category, ...)` регистрирует callback в живом registry. Сборка через `contextMenuRegistry:FireCallbacks(category, inventorySlot, slotActions)`. `callback/arg/priority/deleted` — поля CallbackObject, не произвольные varargs. Пустой результат не повод повторять сборку. |
+| Native rebuild | `ingame/inventory/itemslotactioncontroller.lua:108–120` вызывает discovery, затем `RefreshKeybindStrip` в одном `RebuildActions`. Два независимых post-hooks не должны запускать builders дважды. Проверяется также пустой builder. |
+| Slot actions | `ingame/inventory/inventoryslotactions.lua:167–203`: `AddSlotAction` сразу читает `GetString(id)`, обновляет action/keybind tables и счётчики. `GetNumSlotActions` / `GetSlotAction` должны видеть согласованное состояние. Для capture нужен изолированный coherent facade, а не только перехват `AddMenuItem`. Сохранять action type, visibility, options, silent/visibleWhenDead и read/adjust semantics. |
+| Capture | Подготовка, replacement и registry-depth lookup должны находиться внутри защищённой transaction. Journal восстанавливает точные originals, включая nil, при частичной ошибке setup и builder. Не оставлять live actions после неудачной сборки. Capture не продолжается через таймеры. |
+| Обычное действие | Поддерживаемый label callback вызывается без аргументов, один раз на принятую активацию. Исключение не разрешает повтор с другой сигнатурой. Ошибка может возникнуть после side effect, который bridge не умеет откатить. |
+| Submenu checkbox | LCM `Submenu` вызывает child callback с новым boolean-состоянием. Сохраняется плоская строка `Parent: Child`; выбор ребёнка не вызывает parent. |
+| Mouse controls | Native top-level checkbox вызывает `(buttonControl, checked)`, parent LCM — `(control)`, entries-builder — `(ZO_Menu, control)`, label/checked/disabled evaluators — `(ZO_Menu, submenuItem)`. Inventory row не является этим control. Genuine parent/top-level checkbox и control-dependent формы пропускаются с диагностикой, без fake controls. |
+| Visibility | LCM задаёт default true только отсутствующему `visible`; явно заданная функция получает `ZO_Menu`, её nil/false скрывает строку. Проверять truthiness отдельно от отсутствия поля. |
+| Item identity | Bag/slot — адрес, itemLink — вариант, ни то ни другое не уникальный экземпляр. Перед native junk и injected side effects нужно заново проверить unique ID, enabled/mode и допустимость операции. Смена экземпляра, в том числе при одинаковом link, отменяет старое действие. |
 
-## Зависимости: что именно проверяется
+Источники LCM: `LibCustomMenu.lua:259,308–311,434–497,723–790,862–865`. Native checkbox: `libraries/zo_contextmenus/zo_contextmenus.lua:266–289`, `libraries/zo_templates/buttontemplates.lua:260–280`. Registry: `libraries/utility/zo_callbackobject.lua:23–62,109–195`. Это контрактные ориентиры, не стабильные номера строк production bridge.
 
-`DependsOn`, `PCDependsOn` и `ConsoleDependsOn` задают обязательность и порядок загрузки. Число после `>=` сравнивается с целочисленным `## AddOnVersion`, не с отображаемым `## Version`. Platform-specific варианты ограничивают обязательность соответствующей платформой; они не являются разновидностью optional.
+## Tooltip, выбор и lifecycle
 
-`OptionalDependsOn` нужен только для порядка загрузки установленных/включённых интеграций; версия не создаёт обязательный порог. Поэтому `>=43` удалён, но отсутствие LAM/TTC остаётся допустимым. Вывод подтверждён актуально полученными правилами `t=10790` и разъяснением `t=11595`; wiki-страница manifest при прямом запросе вернула 403, её непрочитанный текст не выдаётся за проверенный parser source.
+- `ZO_Tooltip` — native userdata с Lua mixins. `ZO_PostHook` подходит для его layout-методов; table-форма `SecurePostHook(targetTable, name, callback)` подтверждена exported API. Native классы остаются Lua tables.
+- Строгий table-only mock **не доказывает отсутствие string/global-name overload** `SecurePostHook`: такие вызовы есть в реальных установленных аддонах. Предыдущая ошибка userdata подтверждена, но это другое утверждение.
+- `libraries/zo_tooltip/zo_tooltip.lua:61–67,439–440,1205–1207`: mixed-in `GetParent()` возвращает styled parent, у root это nil, не native ancestry. Геометрию брать у явного owner/container, не у прокручиваемого content tip.
+- `common/zo_tooltip/gamepad/zo_tooltip_gamepad.lua:312–321`: `GetTooltip(type)` возвращает content, `GetTooltipContainer(type)` — внешний контейнер. Crafting owner — `creation.resultTooltip`, `provisioner.resultTooltip`, `alchemy.tooltip` или `enchanting.resultTooltip`; `.tip` — содержимое.
+- Hidden owner не заменяется любым другим видимым tooltip. Hide/selection/source/scene/mode/disable инвалидируют запрос; retry сохраняет исходный token. После исчерпания попыток без anchor окно остаётся скрытым.
+- BrowseResults class local; экспортирован `GAMEPAD_TRADING_HOUSE_BROWSE_RESULTS`. Его `GetSelectedData()` наследуется от `ZO_SortFilterList`. Использовать точный selectedData/index/generation, поля `itemLink`, `stackCount`, `sellerName`, `purchasePrice`; guild-specific link читается по собственному slotIndex. Не применять `itemList:GetTargetData()` и поиск похожего item ID.
+- `LayoutBagItem(bagId, slotIndex, showCombinedCount, extraData)` и `LayoutGuildStoreSearchResult(itemLink, stackCount, sellerName, timeRemainingText)` подтверждены в `publicallingames/tooltip/itemtooltips.lua:1882,2342–2356`.
+- Crafting hooks: `ZO_GamepadSmithingCreation:SetupResultTooltip`, `ZO_GamepadProvisioner:RefreshRecipeDetails(selectedData)`, `ZO_GamepadAlchemy:UpdateTooltip`, `ZO_GamepadEnchanting:UpdateTooltip`. `LayoutFurnishingCraftingResult` не является подтверждённым методом.
 
-Аддон зависит от desktop LibCustomMenu; console support не заявляется и console dependency directives не добавлены. Проверены исходники LCM 7.3.0 / AddOnVersion 730, LAM r43 и указанного выше TTC; обновление номера самого моста не является основанием автоматически повышать эти требования.
+## Цены и материалы
 
-## SavedVariables и жизненный цикл 1.5.5
-
-- `ZO_SavedVars:NewAccountWide(..., defaults, GetWorldName())` использует сервер как пятый аргумент `profile`, без namespace. Путь данных: `[world][displayName]["$AccountWide"]`. Контракт прочитан в `zo_savedvars.lua:67–69`.
-- Только отсутствующий серверный профиль получает копию известных настроек старого `["Default"][displayName]["$AccountWide"]`. Сохраняются значения `false`, вложенный debug log копируется независимо, старый профиль не удаляется. Существующие EU/NA настройки не перезаписываются.
-- В `EVENT_ADD_ON_LOADED` создаются настройки/команды/панель и readiness listeners, но не UI hooks. Первый `EVENT_PLAYER_ACTIVATED` или переход в gamepad запускает установку; в keyboard mode хуки не устанавливаются.
-- Установленные хуки не размножаются. Когда мост или overlay выключен, callback возвращается до построения tooltip. Постоянный input-mode listener нужен только включённому мосту, чтобы отследить возвращение в gamepad.
-- Close listeners торгового дома и станции регистрируются при открытии и снимают себя после закрытия. При отключении/смене режима снимаются overlay events, updater и состояние; включение внутри уже открытого взаимодействия определяется через штатные `GetInteractionType` / `GetCraftingInteractionType` и восстанавливает close listener.
-- Retry tooltip readiness — именованный отменяемый updater с максимум шестью попытками. Generation исключает исполнение устаревшего callback после отмены.
-- `self` сохранён как штатный первый аргумент Lua colon-методов обычной таблицы; metatable для этого не требуется. Повторные обращения к debug SavedVariables заменены локальными ссылками; переписывание всего API только из-за стиля не выполнялось.
-
-## Где обработка ошибок оправданна
-
-Защита нужна на границе исполняемого кода стороннего аддона и при временной подмене menu globals. Она не проверяет наличие встроенной функции и не подбирает сигнатуру. Action callback вызывается один раз; строители меню не переигрываются после побочных эффектов. Проверки nil для ещё не созданных tooltip/UI instances и для необязательных аддонов — отдельные условия жизненного цикла, а не проверки наличия API.
-
-## Пределы проверки
-
-Manifest обновлён на **101051** по исходникам, а не только по номеру в комментарии. Старые API targets не заявляются как поддержанные без проверки.
-
-Локальные Lua-тесты используют явно заданные ESO/TTC fixtures и проверяют управление вызовами, материалы, выбранный лот и таймеры. Они не доказывают игровую совместимость, внешний вид, отсутствие taint или работу с каждым сторонним аддоном.
-
-До повторного рефакторинга 1.5.5 пройдены `luac5.1 -p`, **13 групп / 230 assertions** с fixtures, **13 групп / 226 assertions** при загрузке реального закреплённого `zo_savedvars.lua` через `ESO_SAVEDVARS_SOURCE`, а также `git diff --check`. Разница счётчиков — четыре проверки контракта внутри заменяемого fixture `NewAccountWide`. Проверены миграция legacy, EU/NA изоляция, повторная загрузка и чистая установка; отложенные хуки, закрытие/отключение/повторное включение, отмена updater и nil/non-item links. В продуктовом Lua нет `pcall`, единственный `xpcall` восстанавливает состояние и повторно выбрасывает ошибку.
-
-Историческая проверка 1.5.3 дала 10 групп / 131 assertion, лексическую сверку 32 прямых глобальных API, CRC/состав и побайтовое совпадение исходника с ZIP. Это результаты той версии, не подмена новых проверок.
-
-Смета smithing использует обычный материал выбранного стиля; замена его на Crown Mimic Stone отдельно не моделируется. Сравнение рыночной цены результата с материалами не является расчётом чистой прибыли.
-
-Первоначальный пользовательский прогон 1.5.3 был отмечен успешным, но затем Azmail прислал фактическую ошибку инициализации: `SecurePostHook: table expected, got userdata`. Это выявило пробел в прежних табличных fixtures.
-
-## Повторный рефакторинг 1.5.5
-
-12 ноября 2026 года повторный запрос `esoui/esoui/commits/live` подтвердил тот же закреплённый SHA. Заменены только реализации с подтверждённым штатным аналогом:
-
-| Участок | Штатный контракт в закреплённом исходнике |
+| Область | Контракт |
 |---|---|
-| Обрезка slash-команды | `zo_strtrim(str)`, `esoui/libraries/globals/localization.lua:125–128`. Клиент передаёт строку; отсутствующий текст нормализуется в пустую строку перед вызовом. |
-| Hex цвета качества | `GetItemQualityColor(displayQuality):ToHex()`, `esoui/libraries/globals/defaultcolordefs.lua:198–206`, `esoui/libraries/utility/zo_colordef.lua:92–94,166–192`. Используется кэшированный объект штатной палитры. Результат имеет строчные hex-цифры, RGB и markup-семантика прежние. |
-| Копирование строк tooltip | `ZO_CombineNumericallyIndexedTables(dest, ...)`, `esoui/libraries/utility/zo_tableutils.lua:227–237`. Мутируется только переданный `dest`, исходные плотные массивы строк и их порядок сохраняются; функция не возвращает новый массив. |
+| Item link | `GetLinkType(string)` возвращает enum `LinkType`; сравнение с `LINK_TYPE_ITEM`. `ITEM_LINK_TYPE = "item"` — строковый link-handler token, не enum. Nil/type boundary не доказывает существование предмета. |
+| TTC | Только публичный `TamrielTradeCentrePrice:GetPriceInfo(itemLink)` с self; table или nil, нормализованные `SuggestedPrice/Avg/Min/Max`. Отсутствие provider/PriceTable/цены допустимо. Raw compressed fields не являются API bridge. |
+| Cache | Generation учитывает provider, region, PriceTable, Data и TimeStamp; положительные и отрицательные результаты имеют ограниченный TTL. Retained displayed model наследует ближайший expiry. Обновляется только ещё актуальный видимый owner, без скрытого polling. Unit/stack/comparison должны использовать согласованный price snapshot. |
+| Recipe inputs | `GetRecipeInfo(list, recipe)` result #3 — число видов ингредиентов; `GetRecipeIngredientRequiredQuantity` — требуемое количество, не owned stock. `GetRecipeInfoFromItemId` возвращает station и nullable recipe indices. |
+| Recipe output | `GetRecipeResultQuantity(list, recipe, numIterations)` даёт выход. Native `ingame/crafting/sharedprovisioner.lua:278–280` применяет его для числа результатов. Полную стоимость одного craft нельзя сравнивать с ценой одной штуки при output > 1. Неизвестный выход не подменять единицей для достоверной delta. |
+| Smithing | Аргументы `SetupResultTooltip(pattern, materialIndex, materialQuantity, styleId, traitIndex)` соответствуют native `LayoutPendingSmithingItem`. Брать выбранную materialQuantity; style/trait отдельно через `GetItemStyleMaterialLink` / `GetSmithingTraitItemLink` (trait index, не enum). Crown Mimic Stone отдельно не моделируется. |
+| Неполнота | Суммировать весь состав, а не только восемь видимых строк. Недоступные состав/цены отмечать; сравнение не является чистой прибылью и не включает автоматически все сборы/специальные правила. |
 
-Удалены неиспользуемые `_shouldShowTemplateCraftingOverlay`, `_getTtcPriceTableUpdatedText`, `RgbToHex`, `ClampColorByte`, `FirstPositiveNumber`, лишний currency alias и два флага crafting, в которые код только записывал значения. Тесты проверяют снятие close listener и очистку владельца overlay, а не эти мёртвые флаги. Перехват `AddCustomMenuItem` использует тот же adapter, что и `AddMenuItem`; восстановление обоих globals по-прежнему раздельное. Для компактного overlay устранён повтор выбора цветов и сборки строк.
+## Зависимости, строки и настройки
 
-Не заменены собственный compact currency (`к`/`кк`) и сбор списка ингредиентов: штатный currency formatter имеет другое представление, а API ингредиентов дают отдельные поля, не эквивалентный готовый список. Оставлены generation/readiness проверки, userdata-совместимые хуки и cleanup/rethrow для внешних callback.
+- Required `LibCustomMenu>=730`: порог по integer `AddOnVersion`, не отображаемому `Version`. Это поддерживаемая нижняя граница, не утверждение о первой версии появления каждого метода.
+- Optional `LibAddonMenu-2.0 TamrielTradeCentre`: порядок загрузки, не обязательность; version comparison для optional не действует. `PCDependsOn` / `ConsoleDependsOn` — platform-specific required, не optional. Console support не заявляется.
+- `ZO_SavedVars:NewAccountWide(..., defaults, GetWorldName())`: world — пятый аргумент profile (`libraries/utility/zo_savedvars.lua:67–69`). EU/NA-профили наследуют legacy только при отсутствии собственного; false и независимую копию log сохранять, старые данные не удалять.
+- UI hooks откладываются до readiness/gamepad, повторные установки не размножаются. Disable/mode/interaction close отменяют соответствующие listeners/updaters; включение внутри открытой станции/TH требует актуального close listener.
+- `SafeAddString` позволяет обновлять один private StringId; native `AddSlotAction` snapshot-ит текст синхронно. Это не обещание совместимости со сторонней заменой метода, откладывающей чтение ID.
+- Штатные helpers: `zo_strtrim`, `GetItemQualityColor(...):ToHex()`, `ZO_CombineNumericallyIndexedTables`, `zo_strformat(SI_TOOLTIP_ITEM_NAME, name)`. Копирование не должно менять исходные cached arrays.
 
-После изменений: `luac5.1 -p`, **15 групп / 264 assertions** под Lua 5.1 и обычным `lua`, `git diff --check`, сборка и побайтовая сверка всех четырёх файлов ZIP. Новые группы проверяют порядок и цвета compact output, native trim/quality colour, копирование без изменения кэша/материалов и граничные значения compact currency. Основной Lua сократился с **2446 до 2342 строк** относительно `2add83a`. Скорость в игре не измерялась; это уменьшение дублирования, не доказанное ускорение. Игровой прогон этого изменения не выполнялся.
+## История локальных проверок, не финальная оценка
 
-## Доработки перед публикацией 1.5.5
+| Этап | Записанный тогда результат |
+|---|---|
+| 1.5.3 | 10 групп / 131 assertion; лексическая сверка 32 global API; CRC/состав/byte compare тогдашнего ZIP |
+| 1.5.4 userdata correction | 10 групп / 140 проверок; до фикса воспроизведена ошибка userdata |
+| Ранняя 1.5.5 | 13 групп / 230 assertions; с реальным pinned SavedVars — 13 / 226 (разница — четыре fixture assertions) |
+| Повторный refactor 1.5.5 | 15 групп / 264 assertions; тогдашний ZIP из четырёх файлов проверен; Lua 2446 → 2342 строки относительно `2add83a` |
+| Перед пятью reviews | 18 групп / 809 assertions; 3000 подписей / 1 выделенный StringId |
+| База пяти reviews `77ed20e` + dirty TTC fix | 18 групп / 815 assertions под Lua 5.1 и обычным Lua; дополнительные probes выявили реальные пробелы этих fixtures |
 
-База — `f941ebd`; номер версии и API не изменены.
+Эти числа — история разных состояний, **815 не является финальным результатом текущего исправления**. Новый итог берётся только из реально исполненного финального harness с указанием состояния кода. Восемь quality probes PASS означали успешное воспроизведение дефектов, не их исправление. Старый четырёхфайловый ZIP не подтверждает нынешнюю корректность лицензии/упаковки.
 
-- **Overlay debounce.** Последний запрос подавляется только для того же активного владельца и поколения overlay. `_hideOverlay` уже увеличивает поколение и сбрасывает владельца, поэтому повторный показ того же предмета больше не блокируется 200-миллисекундным окном. В ключ добавлены источник отображения, style/trait и выбор smithing ingredients; отметка поколения записывается после запроса показа. Отложенный актуальный запрос по-прежнему объединяется, старые retries отменяются поколением.
-- **Один StringId вместо кэша по подписи.** В закреплённом `esoui/ingame/inventory/inventoryslotactions.lua:167–183` метод `AddSlotAction` синхронно вызывает `GetString(actionStringId)` и сохраняет готовый текст в `m_slotActions`. Поэтому private `SI_LGCMB_ACTION` создаётся один раз, затем его значение обновляется штатным `SafeAddString(id, label, 0)`. Его реализация в `esoui/ingamelocalization/localizegeneratedstrings.lua:14–21` разрешает обновление custom ID без записи версии. Внутренние `EsoStrings` не изменяются напрямую; обычная строка вместо обязательного ID в `AddSlotAction` не передаётся. Уже созданные массивы действий, named aliases и callback не меняются при следующем обновлении ID. Это контракт штатного метода, не сертификация произвольных сторонних замен `AddSlotAction`, откладывающих чтение ID.
-- **Ленивые логи.** `_debugMessage(format, verboseOnly, ...)` сначала проверяет debug/verbose, затем форматирует сообщение с аргументами. Сообщение без аргументов остаётся литералом, включая `%`. Hot-path вызовы logger больше не выполняют предварительное `string.format`, конкатенацию и обрезку itemLink.
+Первоначальный успешный отчёт Azmail о 1.5.3 позднее дополнился фактической startup-ошибкой `SecurePostHook: table expected, got userdata`. Он не переносится на 1.5.5. Lua fixtures не доказывают secure/taint, engine geometry, protected side effects, визуальную совместимость или измеренное ускорение.
 
-Проверки: `luac5.1 -p`, **18 групп / 809 assertions** под Lua 5.1 и обычным `lua`, `git diff --check`. Новые сценарии: show/hide/show, смена источника и владельца, истечение debounce, изменения craft context, пустой результат с последующим появлением данных, объединение readiness retry и отмена старого callback; 500 меню по 6 уникальных подписей (**3000 подписей, 1 выделенный ID**) с сохранением старых/новых имён и callback; отсутствие форматирования при выключенном debug/verbose, литерал `%`, числовые и nil аргументы.
+## Текущая локальная проверка
 
-Разделение tooltip data/rendering и локализация не входят в эту доработку. Игровой smoke и совместимость с конкретным набором сторонних аддонов на домашнем ПК пока не проверены.
+Реализованы и проверены unique identity/actions, один context builder dispatch, capture setup/rollback и coherent slotActions, unsupported-control filtering, visible nil, owner/container/retry exhaustion, TTC generation/TTL и recipe output basis. Дополнительные integration-сценарии загружают реальный LCM HookContextMenu и native tooltip manager: keybind lifecycle, смешанный ClearMenu/sa:Clear, смена layout без hide и nullable unique ID.
 
-## Хотфикс 1.5.4
+Независимый повтор под Lua 5.1 и Lua 5.5: **18 regression groups / 849 assertions + 25 contract groups + 4 integration groups**, syntax и diff checks — PASS. Полный запуск требует `ESO_NATIVE_SOURCE` (pinned ESO checkout) и `ESO_LCM_SOURCE` (исходник LibCustomMenu 7.3.0); точные команды — в [приёмке](ACCEPTANCE_AND_RELEASE.md).
 
-Native tooltip — `userdata` с Lua-методами. Его геометрические методы корректны, но `SecurePostHook` принимает в объектной форме только таблицу. Для `LayoutBagItem` и `LayoutGuildStoreSearchResult` применён `ZO_PostHook`: штатная реализация в `esoui/libraries/utility/zo_hook.lua` читает и присваивает метод через индекс объекта, что подходит native control. Хуки Lua-классов остаются `SecurePostHook`.
+Независимо повторены **14 PASS** в `python3 -B scripts/tests/test_packaging.py` на disposable synthetic repos. Прочитанный новый `build_release.py` использует Python 3 stdlib, allowlist manifest/Lua/README/CREDITS + root LICENSE внутри addon folder, проверяет версии/runtime filenames, CRC и байты, запрещает overwrite, включая concurrent build. `build_release.sh` — совместимый wrapper; executable `zip` не требуется. Это не игровые тесты; реальный dist/release в текущей задаче не собирался.
 
-Regression fixtures теперь используют настоящий Lua `userdata`, а `SecurePostHook` отвергает его точно как клиент. До исправления воспроизведена та же ошибка на строке 1656; после замены обеих регистраций пройдены 10 групп / 140 проверок, включая однократность вызова и сохранение return value штатного layout. Beta-статус сохранён. Подробные игровые сценарии находятся в [приёмке выпуска](ACCEPTANCE_AND_RELEASE.md).
+После локальных проверок остаются [игровые acceptance gates](ACCEPTANCE_AND_RELEASE.md). До их выполнения 1.5.5 остаётся development/test; публикационные тексты — черновики для решения владельца. Упаковка и разрешение на публикацию проверяются отдельно.

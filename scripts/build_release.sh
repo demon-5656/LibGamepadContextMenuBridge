@@ -1,29 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ADDON_DIR="$ROOT_DIR/LibGamepadContextMenuBridge"
-DIST_DIR="$ROOT_DIR/dist"
-
-if [[ ! -d "$ADDON_DIR" ]]; then
-  echo "Addon directory not found: $ADDON_DIR" >&2
+if ! command -v python3 >/dev/null 2>&1; then
+  printf '%s\n' 'Python 3 is required to create and verify the release ZIP.' >&2
   exit 1
 fi
-
-VERSION="$(awk -F': ' '/^## Version:/ {print $2}' "$ADDON_DIR/LibGamepadContextMenuBridge.txt" | tr -d '[:space:]')"
-if [[ -z "$VERSION" ]]; then
-  VERSION="dev"
-fi
-
-mkdir -p "$DIST_DIR"
-BASENAME="LibGamepadContextMenuBridge-v${VERSION}"
-
-if command -v zip >/dev/null 2>&1; then
-  rm -f "$DIST_DIR/${BASENAME}.zip"
-  (cd "$ROOT_DIR" && zip -r "$DIST_DIR/${BASENAME}.zip" "LibGamepadContextMenuBridge" >/dev/null)
-  echo "Built: $DIST_DIR/${BASENAME}.zip"
-else
-  rm -f "$DIST_DIR/${BASENAME}.tar.gz"
-  (cd "$ROOT_DIR" && tar -czf "$DIST_DIR/${BASENAME}.tar.gz" "LibGamepadContextMenuBridge")
-  echo "Built: $DIST_DIR/${BASENAME}.tar.gz"
-fi
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec python3 "$ROOT_DIR/scripts/build_release.py"

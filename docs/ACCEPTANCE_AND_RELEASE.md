@@ -1,6 +1,20 @@
 # Приёмка, пилот и подача продукта
 
-**Статус: шаблоны подробной приёмки.** Для выпуска 1.5.3 Azmail 12 ноября 2026 года подтвердил успешный игровой прогон; отдельные строки матрицы не заполнялись.
+**Текущий статус: 1.5.5 development, игровая приёмка NOT RUN.** Локальные результаты предыдущих состояний не являются приёмкой текущего refactor. Первоначальный успешный отчёт о 1.5.3 позднее дополнился фактической startup-ошибкой; она исправлялась отдельно в 1.5.4. Матрица 1.5.5 не заполнена.
+
+## Обязательные gates для текущего исправления
+
+- [x] Финальный implementation diff независимо проверен; полный runner и упаковочные тесты выполнены на этом состоянии. Результат: 18 regression groups / 849 assertions + 25 contract groups + 4 integrations под Lua 5.1/5.5; 14 packaging tests. Это offline PASS, не игровая приёмка.
+- [ ] Устаревшие native junk и сторонние actions не выполняются после замены экземпляра в том же слоте (включая одинаковый link), disable, смены mode и разрешений.
+- [ ] Native rebuild вызывает builders один раз; capture setup/error восстанавливает globals, nil originals и coherent action state без частичной записи в live slotActions.
+- [ ] Поддерживаемые flat children и boolean submenu checkboxes работают; genuine mouse parent/top-level checkbox и control-dependent формы пропускаются с диагностикой. Fake controls не создаются.
+- [ ] Overlay следует только своему owner/container; скрытие owner и исчерпание retries оставляют окно скрытым. Проверены scrolling content, смена предмета/сцены и отмена отложенного запроса.
+- [ ] TTC nil→ready, смена данных/региона и TTL проверены, включая открытый overlay; скрытого polling нет. Цены unit/stack/comparison согласованы.
+- [ ] Recipe output 1 и >1, неизвестный выход и неполные цены проверены; стоимость craft и результата имеют один базис, сравнение не названо прибылью.
+- [ ] В ESO выполнены применимые строки матрицы ниже с точными версиями и наблюдаемым результатом, включая TTC correction. Никакой локальный PASS не заменяет это условие.
+- [ ] Отдельно подтверждены состав будущего пакета и LICENSE, AI disclosure в начале описания, зависимости и credits. Для сборки/публикации получено явное разрешение владельца.
+
+Until the gates are complete, [ESOUI_DESCRIPTION.bbcode](ESOUI_DESCRIPTION.bbcode) remains an English-only draft; this document does not authorize a release, tag or upload.
 
 База: 1.5.2, commit `9c5fee6e7ee2677c062b580e78b54546bee7247a`. Подготовлено 11 ноября 2026 года.
 
@@ -43,7 +57,7 @@
 |---|---|---|---|
 | G-01 | Открыть персонажа и inventory в gamepad mode | Нет новых ошибок загрузки; native actions доступны | Для первого игрового пилота |
 | G-02 | Выполнить безопасное действие конкретного LibCustomMenu-аддона | Изменился именно выбранный предмет; действие сработало один раз | Для заявления о поддержке этого сочетания |
-| G-03 | Проверить parent, child и checkbox на контролируемом меню | Независимая семантика; ребёнок не запускает parent; toggle меняет ожидаемое состояние | При приёмке соответствующих типов меню |
+| G-03 | Проверить supported flat child и boolean submenu checkbox; отдельно unsupported mouse parent/top-level checkbox/control-dependent forms | Ребёнок не запускает parent, boolean toggle корректен; unsupported формы пропущены, fake controls отсутствуют | Для текущего menu adapter |
 | G-04 | Переместить выбор между предметами и закрыть inventory при обновлении overlay | Нет данных прошлого предмета и всплытия закрытого overlay | Для включённого overlay |
 | G-05 | Проверить «в хлам / убрать из хлама» на подходящем предмете | Состояние меняется предсказуемо, без второго дубля команды | Для обещания native junk fallback |
 | G-06 | Проверить отсутствие optional TTC и LibAddonMenu | При наличии обязательного LibCustomMenu базовые actions продолжают работать; недоступная информация не ломает меню | Для заявления о независимости actions от optional-интеграций |
@@ -74,18 +88,22 @@
 
 Для **изменения кода** использовать релевантные проверки проекта:
 
-- `lua scripts/tests/regression.lua` — текущий regression harness.
-- `lua5.1 scripts/tests/regression.lua` — проверка на Lua 5.1, если этот интерпретатор доступен.
+- Полный набор: `ESO_NATIVE_SOURCE=/path/to/esoui ESO_LCM_SOURCE=/path/to/LibCustomMenu.lua lua5.1 scripts/tests/run.lua lua5.1`; повтор на другом Lua — с теми же переменными и `lua scripts/tests/run.lua lua`.
+- `ESO_NATIVE_SOURCE` — checkout официального `esoui/esoui`, закреплённый на `f819c808d57e237707c76e7b52518e2589c9e191` (API 101051). Нужны настоящие native Lua sources и `ESO_LCM_SOURCE` — путь к исходнику LibCustomMenu 7.3.0. Отсутствие первичных текстов — блокер полного прогона, не PASS. Runner запускает контрактные и integration-группы в отдельных процессах.
+- Последний независимый повтор: под Lua 5.1 и Lua 5.5 прошли **18 regression groups / 849 assertions + 25 contract groups + 4 integration groups**. Это локальные проверки, не игровая приёмка.
+- Только базовая регрессия без native checkout: `lua5.1 scripts/tests/regression.lua`; она не заменяет полный runner.
 - Синтаксис изменённых Lua-файлов и `git diff --check`.
-- При изменении упаковки — штатная сборка `bash scripts/build_release.sh`, CRC, install-folder layout, версии, отсутствие лишнего и соответствие упакованного кода проверенному исходнику.
+- При изменении упаковки — `python3 -B scripts/tests/test_packaging.py` в disposable synthetic repos: **14 тестов PASS**, независимо повторены. Это проверки упаковки, не игровые и не Lua regression tests.
+- Сборка — отдельный разрешаемый шаг: `bash scripts/build_release.sh` (wrapper) или `python3 scripts/build_release.py`. Нужен **Python 3 со стандартной библиотекой**, отдельный executable `zip` не нужен. В текущей задаче реальный `dist`/release не собирался.
+- Allowlist ZIP: ровно пять файлов под `LibGamepadContextMenuBridge/`: одноимённые manifest/Lua, `README.md`, `CREDITS.md`, а также корневой `LICENSE`, помещённый в папку аддона. Проверяются версии Lua/manifest, runtime filenames manifest, CRC и побайтовое соответствие. Существующий ZIP не перезаписывается, включая concurrent build; не удалять его автоматически для обхода отказа.
 
-Не выдавать отсутствие интерпретатора или пропущенный тест за `PASS`. Не запускать чужие материалы из `tests/` как доказательство качества ESO-аддона: текущий проверочный entry point — [scripts/tests/regression.lua](../scripts/tests/regression.lua).
+Не выдавать отсутствие интерпретатора или пропущенный тест за `PASS`. Не запускать чужие материалы из `tests/` как доказательство качества ESO-аддона: полный проверочный entry point — [scripts/tests/run.lua](../scripts/tests/run.lua).
 
 Для **документационной правки**, как эта, достаточно ссылок, согласованности статусов и diff-проверки. Она не требует пересборки релиза или повторного игрового прогона.
 
 ## 6. Короткая диагностика для сообщения об ошибке
 
-Команды уже реализованы в 1.5.2: [источник](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua#L3614).
+Команды диагностики: [источник](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua).
 
 1. Записать версии и ожидаемое действие.
 2. Посмотреть `/lgcmb status`.
@@ -123,7 +141,7 @@
 
 | Блок | Содержание | Основание |
 |---|---|---|
-| Первая строка | Что теперь можно сделать с геймпада | Одно конкретное действие, прошедшее G-02 |
+| Начало описания | AI disclosure, затем краткая польза и required LibCustomMenu>=730 | Проверенные правила ESOUI и действие, прошедшее G-02 |
 | До / после | Один предмет и одна операция, одинаковые настройки UI | Реальная запись; никаких нарисованных результатов |
 | Установка | PC, зависимости, путь и включение аддона | Проверенная установка текущего ZIP |
 | Совместимость | Exact versions, источник проверки, известные ограничения | Заполненная матрица, не список популярных названий |

@@ -135,7 +135,7 @@ local function EvaluateValue(value, ...)
 end
 
 local function HasItemLink(link)
-    return type(link) == "string" and GetLinkType(link) == ITEM_LINK_TYPE
+    return type(link) == "string" and GetLinkType(link) == LINK_TYPE_ITEM
 end
 
 function bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
@@ -230,7 +230,7 @@ function bridge:_summarizeContextRegistry()
     for category = LibCustomMenu.CATEGORY_EARLY, LibCustomMenu.CATEGORY_LATE do
         local count = 0
         for _, entry in ipairs(registry and registry[category] or {}) do
-            if not entry[3] then
+            if not entry[4] then
                 count = count + 1
             end
         end
@@ -258,18 +258,46 @@ function bridge:_resolveBagAndSlot(inventorySlot)
     return ZO_Inventory_GetBagAndIndex(inventorySlot)
 end
 
+-- Bag/slot is an address, not an item identity. ESO id64 values must not be
+-- converted to floating-point numbers (two different instances may share a link).
+function bridge:_getSlotIdentity(inventorySlot)
+    local bagId, slotIndex = self:_resolveBagAndSlot(inventorySlot)
+    if bagId == nil or slotIndex == nil then return nil end
+    local uniqueId = GetItemUniqueId(bagId, slotIndex)
+    if uniqueId == nil then return nil end
+    local id = Id64ToString(uniqueId)
+    if id == "0" then return nil end
+    return { bagId=bagId, slotIndex=slotIndex, id=id }
+end
+
+function bridge:_isCurrentActionItem(identity, inventorySlot)
+    if not self.enabled or not IsInGamepadPreferredMode() or not identity then return false end
+    local current = self:_getSlotIdentity(inventorySlot)
+    return current ~= nil and current.bagId == identity.bagId
+        and current.slotIndex == identity.slotIndex and current.id == identity.id
+end
+
 function bridge:_buildNativeJunkAction(inventorySlot)
     local bagId, slotIndex = self:_resolveBagAndSlot(inventorySlot)
     if bagId == nil or slotIndex == nil or bagId == BAG_VIRTUAL then
         return nil
     end
+    local identity = self:_getSlotIdentity(inventorySlot)
+    if not identity then return nil end
     local isJunk = IsItemJunk(bagId, slotIndex)
-    if not isJunk and (IsItemPlayerLocked(bagId, slotIndex) or not CanItemBeMarkedAsJunk(bagId, slotIndex)) then
+    if IsItemPlayerLocked(bagId, slotIndex) or not CanItemBeMarkedAsJunk(bagId, slotIndex) then
         return nil
     end
     return {
         label = GetString(isJunk and SI_ITEM_ACTION_UNMARK_AS_JUNK or SI_ITEM_ACTION_MARK_AS_JUNK),
         callback = function()
+            if not bridge:_isCurrentActionItem(identity, inventorySlot)
+                or IsItemJunk(bagId, slotIndex) ~= isJunk
+                or IsItemPlayerLocked(bagId, slotIndex)
+                or not CanItemBeMarkedAsJunk(bagId, slotIndex) then
+                LogDebug("Skipped stale or ineligible junk action")
+                return
+            end
             SetItemIsJunk(bagId, slotIndex, not isJunk)
         end,
     }
@@ -473,10 +501,17 @@ end
 
 function bridge:_getTtcPriceInfo(itemLink)
     -- TTC is optional; once loaded, use its documented public price provider.
-    if not TamrielTradeCentrePrice or not HasItemLink(itemLink) then
+    if not TamrielTradeCentrePrice then
+        LogTrace("TTC lookup skipped: provider missing")
         return nil
     end
-    return TamrielTradeCentrePrice:GetPriceInfo(itemLink)
+    if not HasItemLink(itemLink) then
+        LogTrace("TTC lookup skipped: invalid item link")
+        return nil
+    end
+    local info = TamrielTradeCentrePrice:GetPriceInfo(itemLink)
+    if info == nil then LogTrace("TTC lookup returned no price") end
+    return info
 end
 
 function bridge:_formatTooltipInfoCurrency(value)
@@ -526,20 +561,44 @@ function bridge:_getTooltipTtcCacheKey(itemLink)
     }, "|")
 end
 
+local function BoundedCacheInsert(owner, cacheField, sizeField, limit, key, value)
+    if owner[cacheField][key] == nil then
+        if owner[sizeField] >= limit then
+            owner[cacheField], owner[sizeField] = {}, 0
+        end
+        owner[sizeField] = owner[sizeField] + 1
+    end
+    owner[cacheField][key] = value
+end
+
+function bridge:_getTtcCacheFingerprint()
+    local provider = TamrielTradeCentrePrice
+    local prices = provider and provider.PriceTable
+    local region = TamrielTradeCentre and TamrielTradeCentre:GetCurrentServerRegion()
+    return table.concat({tostring(provider), tostring(prices), tostring(prices and prices.Data),
+        tostring(prices and prices.TimeStamp), tostring(region), GetWorldName()}, "|")
+end
+
 function bridge:_getCachedTtcTooltipLines(itemLink)
     local cacheKey = self:_getTooltipTtcCacheKey(itemLink)
     if not cacheKey then
         return nil
     end
 
+    local now = GetGameTimeMilliseconds()
+    local fingerprint = self:_getTtcCacheFingerprint()
     local cached = self._tooltipTtcCache[cacheKey]
-    if cached ~= nil then
-        return cached
+    if cached and cached.fingerprint == fingerprint and now < cached.expiresAt then
+        return cached.lines, cached.info, cached.expiresAt
     end
 
-    local lines = {}
+    local lines, priceInfo = {}, nil
+    local info = self:_getTtcPriceInfo(itemLink)
+    if type(info) == "table" then
+        -- TTC can return a mutable table; retain only this request's price values.
+        priceInfo = {SuggestedPrice=info.SuggestedPrice, Avg=info.Avg, Min=info.Min, Max=info.Max}
+    end
     if self:_shouldShowTtcTooltipPrice() then
-        local priceInfo = self:_getTtcPriceInfo(itemLink)
         if type(priceInfo) == "table" then
             local primaryPrice = priceInfo.SuggestedPrice or priceInfo.Avg or priceInfo.Min
             local primaryPriceText = self:_formatTooltipInfoCurrency(primaryPrice)
@@ -558,16 +617,22 @@ function bridge:_getCachedTtcTooltipLines(itemLink)
         end
     end
 
-    if self._tooltipTtcCache[cacheKey] == nil then
-        self._tooltipTtcCacheSize = (self._tooltipTtcCacheSize or 0) + 1
-        if self._tooltipTtcCacheSize > 256 then
-            self._tooltipTtcCache = {}
-            self._tooltipTtcCacheSize = 0
-        end
-    end
+    local expiresAt = now + (priceInfo and 5000 or 1000)
+    BoundedCacheInsert(self, "_tooltipTtcCache", "_tooltipTtcCacheSize", 256, cacheKey,
+        {lines=lines, info=priceInfo, expiresAt=expiresAt, fingerprint=fingerprint})
+    return lines, priceInfo, expiresAt
+end
 
-    self._tooltipTtcCache[cacheKey] = lines
-    return lines
+function bridge:_getRequestPriceInfo(request, itemLink)
+    if not HasItemLink(itemLink) then return nil, {} end
+    local snapshot = request.prices[itemLink]
+    if snapshot == nil then
+        local lines, info, expiresAt = self:_getCachedTtcTooltipLines(itemLink)
+        snapshot = {lines=lines or {}, info=info}
+        request.prices[itemLink] = snapshot
+        if expiresAt then request.expiresAt = math.min(request.expiresAt or expiresAt, expiresAt) end
+    end
+    return snapshot.info, snapshot.lines
 end
 
 function bridge:_getItemLinkFromBagAndSlot(bagId, slotIndex)
@@ -612,7 +677,10 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
 
     local stackCount = GetSlotStackSize(bagId, slotIndex)
     if itemLink then
-        ZO_CombineNumericallyIndexedTables(lines, self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false))
+        local itemLines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, nil, false)
+        ZO_CombineNumericallyIndexedTables(lines, itemLines)
+        lines.expiresAt = itemLines.expiresAt
+        lines.priceFingerprint = itemLines.priceFingerprint
     end
 
     local junkStatus = self:_getJunkStatusText(bagId, slotIndex)
@@ -628,8 +696,9 @@ function bridge:_buildTooltipInfoLines(bagId, slotIndex)
     return lines
 end
 
-function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice, includeVendor, craftContext, source)
+function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice, includeVendor, craftContext, source, request)
     local lines = {}
+    request = request or {prices={}}
     if type(itemLink) ~= "string" or itemLink == "" then
         return lines
     end
@@ -643,10 +712,10 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
     end
 
     if self:_shouldShowTtcTooltipPrice() then
-        ZO_CombineNumericallyIndexedTables(lines, self:_getCachedTtcTooltipLines(itemLink))
+        local priceInfo, unitLines = self:_getRequestPriceInfo(request, itemLink)
+        ZO_CombineNumericallyIndexedTables(lines, unitLines)
 
         if type(stackCount) == "number" and stackCount > 1 then
-            local priceInfo = self:_getTtcPriceInfo(itemLink)
             if priceInfo then
                 local unitPrice = priceInfo.SuggestedPrice or priceInfo.Avg
                 if type(unitPrice) == "number" and unitPrice > 0 then
@@ -662,7 +731,6 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
         if type(listingPrice) == "number" and listingPrice > 0
             and type(stackCount) == "number" and stackCount > 0
         then
-            local priceInfo = self:_getTtcPriceInfo(itemLink)
             local unitPrice = priceInfo and (priceInfo.SuggestedPrice or priceInfo.Avg)
             if type(unitPrice) == "number" and unitPrice > 0 then
                 local listingPerUnit = listingPrice / stackCount
@@ -683,7 +751,7 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
     end
 
     if source == "furncraft" and type(craftContext) == "table" then
-        ZO_CombineNumericallyIndexedTables(lines, self:_buildCraftMaterialCostLines(itemLink, craftContext))
+        ZO_CombineNumericallyIndexedTables(lines, self:_buildCraftMaterialCostLines(itemLink, craftContext, request))
     end
 
     if includeVendor and self:_shouldShowVendorPriceInTooltip() then
@@ -696,6 +764,8 @@ function bridge:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice,
         end
     end
 
+    lines.expiresAt = request.expiresAt
+    lines.priceFingerprint = self:_getTtcCacheFingerprint()
     return lines
 end
 
@@ -733,7 +803,7 @@ function bridge:_collectRecipeIngredientsByResultLink(resultItemLink)
     if itemId > 0 then
         local _, recipeListIndex, recipeIndex = GetRecipeInfoFromItemId(itemId)
         if recipeListIndex and recipeIndex then
-            return self:_collectRecipeIngredients(recipeListIndex, recipeIndex)
+            return self:_collectRecipeIngredients(recipeListIndex, recipeIndex), recipeListIndex, recipeIndex
         end
     end
     return {}
@@ -772,20 +842,27 @@ function bridge:_collectSmithingPatternIngredients(craftContext)
     return ingredients
 end
 
-function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
+function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext, request)
     if type(craftContext) ~= "table" then
         return {}
     end
+    request = request or {prices={}}
 
-    local ingredients
+    local ingredients, outputQuantity
+    local recipeListIndex, recipeIndex = craftContext.recipeListIndex, craftContext.recipeIndex
     if craftContext.recipeListIndex and craftContext.recipeIndex then
         ingredients = self:_collectRecipeIngredients(craftContext.recipeListIndex, craftContext.recipeIndex)
     elseif craftContext.forceSmithingPatternMaterials then
         ingredients = self:_collectSmithingPatternIngredients(craftContext)
+        outputQuantity = 1
     elseif craftContext.selectedData then
         ingredients = self:_collectIngredientsFromSelectedData(craftContext.selectedData)
+        recipeListIndex, recipeIndex = craftContext.selectedData.recipeListIndex, craftContext.selectedData.recipeIndex
     else
-        ingredients = self:_collectRecipeIngredientsByResultLink(resultItemLink)
+        ingredients, recipeListIndex, recipeIndex = self:_collectRecipeIngredientsByResultLink(resultItemLink)
+    end
+    if recipeListIndex and recipeIndex then
+        outputQuantity = GetRecipeResultQuantity(recipeListIndex, recipeIndex, 1)
     end
 
     if #ingredients == 0 then
@@ -820,7 +897,7 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
             namedIngredientCount = namedIngredientCount + 1
             local costText = "n/a"
             if HasItemLink(link) then
-                local priceInfo = self:_getTtcPriceInfo(link)
+                local priceInfo = self:_getRequestPriceInfo(request, link)
                 local unitPrice = priceInfo and (priceInfo.SuggestedPrice or priceInfo.Avg)
                 if type(unitPrice) == "number" and unitPrice > 0 then
                     local lineCost = unitPrice * qty
@@ -843,20 +920,23 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
 
     if knownCostCount == #ingredients then
         local totalText = self:_formatCompactTooltipCurrency(totalCost) or tostring(math.floor(totalCost + 0.5))
-        lines[#lines + 1] = "|cD7C98FMat total: " .. totalText .. "|r"
+        lines[#lines + 1] = "|cD7C98FMat total: " .. totalText .. " (per craft)|r"
 
-        local resultPriceInfo = self:_getTtcPriceInfo(resultItemLink)
+        local resultPriceInfo = self:_getRequestPriceInfo(request, resultItemLink)
         local resultUnit = resultPriceInfo and (resultPriceInfo.SuggestedPrice or resultPriceInfo.Avg)
-        if type(resultUnit) == "number" and resultUnit > 0 then
-            local delta = resultUnit - totalCost
+        if type(outputQuantity) == "number" and outputQuantity > 0 and type(resultUnit) == "number" and resultUnit > 0 then
+            local delta = resultUnit * outputQuantity - totalCost
             local deltaText = self:_formatCompactTooltipCurrency(math.abs(delta)) or tostring(math.floor(math.abs(delta) + 0.5))
+            local basis = string.format(" (per craft; output x%d)|r", outputQuantity)
             if delta > 0.5 then
-                lines[#lines + 1] = "|c6AB87Avs crafted: +" .. deltaText .. "|r"
+                lines[#lines + 1] = "|c6AB87Avs crafted: +" .. deltaText .. basis
             elseif delta < -0.5 then
-                lines[#lines + 1] = "|cD46A6Avs crafted: -" .. deltaText .. "|r"
+                lines[#lines + 1] = "|cD46A6Avs crafted: -" .. deltaText .. basis
             else
-                lines[#lines + 1] = "|cA0A070vs crafted: near zero|r"
+                lines[#lines + 1] = "|cA0A070vs crafted: near zero" .. basis
             end
+        elseif type(outputQuantity) ~= "number" or outputQuantity <= 0 then
+            lines[#lines + 1] = "|cD7C98FCraft comparison unavailable: output unknown|r"
         end
     end
 
@@ -915,15 +995,7 @@ local function FormatTooltipLine(text)
         formatted = "|cB8B29A" .. text .. "|r"
     end
 
-    if bridge._formattedTooltipLineCache[text] == nil then
-        bridge._formattedTooltipLineCacheSize = (bridge._formattedTooltipLineCacheSize or 0) + 1
-        if bridge._formattedTooltipLineCacheSize > 128 then
-            bridge._formattedTooltipLineCache = {}
-            bridge._formattedTooltipLineCacheSize = 0
-        end
-    end
-
-    bridge._formattedTooltipLineCache[text] = formatted
+    BoundedCacheInsert(bridge, "_formattedTooltipLineCache", "_formattedTooltipLineCacheSize", 128, text, formatted)
     return formatted
 end
 
@@ -1065,82 +1137,45 @@ function bridge:_isRenderableControl(control)
         and control:GetHeight() > 0
 end
 
-function bridge:_getOverlayTooltipBySource(source)
-
-    local tooltipTypes = nil
-    if source == "furncraft" then
-        tooltipTypes = { GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP }
-    else
-        tooltipTypes = { GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_LEFT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP }
-    end
-
-    for i = 1, #tooltipTypes do
-        local tooltipType = tooltipTypes[i]
-        if tooltipType ~= nil then
-            local tooltip = GAMEPAD_TOOLTIPS:GetTooltip(tooltipType)
-            if self:_isRenderableControl(tooltip) then
-                return tooltip
-            end
-        end
-    end
-
+-- A content tooltip mixes in a styled GetParent(), not native ancestry.
+-- Native callers pass the manager container / crafting panel explicitly.
+function bridge:_getActiveOverlayTooltip()
+    local owner = self._overlayOwnerControl or self._overlayTooltipControl
+    if self:_isRenderableControl(owner) then return self._overlayTooltipControl end
     return nil
 end
 
-function bridge:_getActiveOverlayTooltip()
-    if self:_isRenderableControl(self._overlayTooltipControl) then
-        return self._overlayTooltipControl
-    end
-
-    return self:_getOverlayTooltipBySource(self._overlaySource)
-end
-
 function bridge:_getOverlayAnchorContainer()
-    local tooltip = self:_getActiveOverlayTooltip()
-    if not self:_isRenderableControl(tooltip) then
-        return nil
-    end
-
-    local current = tooltip
-    local best = tooltip
-    local guiRoot = _G.GuiRoot
-
-    for _ = 1, 8 do
-        local parent = current:GetParent()
-        if parent == nil or not self:_isRenderableControl(parent) or parent == guiRoot then
-            break
-        end
-
-        best = parent
-        current = parent
-    end
-
-    return best
+    local owner = self._overlayOwnerControl or self._overlayTooltipControl
+    if self:_isRenderableControl(owner) then return owner end
+    return nil
 end
 
 function bridge:_shouldKeepOverlayVisible()
-    local tooltip = self:_getActiveOverlayTooltip()
-    return self:_isRenderableControl(tooltip) or self:_isRenderableControl(self._overlayAnchorControl)
+    if self._overlayOwnerControl or self._overlayTooltipControl then
+        return self:_getOverlayAnchorContainer() ~= nil
+    end
+    return self:_isRenderableControl(self._overlayAnchorControl)
 end
 
 function bridge:_refreshOverlayVisibility()
     local overlay = self._overlayWindow
-    if not overlay or not overlay.window or overlay.window:IsHidden() then
-        return
-    end
-
+    if not overlay or not overlay.window or overlay.window:IsHidden() then return end
     local now = GetGameTimeMilliseconds()
-    if now - (overlay._lastVisibilityCheckAt or 0) < 100 then
-        return
-    end
+    if now - (overlay._lastVisibilityCheckAt or 0) < 100 then return end
     overlay._lastVisibilityCheckAt = now
-
-    if self:_shouldKeepOverlayVisible() then
+    if not self:_canUseOverlay() or not self:_shouldKeepOverlayVisible() then
+        self:_hideOverlay()
         return
     end
-
-    self:_hideOverlay()
-    LogTrace("Overlay hidden by visibility guard")
+    -- No timer/polling survives hide. Only the current visible owner's model can
+    -- refresh, using its retained request, never a different visible tooltip.
+    if self._overlayRefresh and self._overlayPriceExpiresAt
+        and (now >= self._overlayPriceExpiresAt or self._overlayPriceFingerprint ~= self:_getTtcCacheFingerprint()) then
+        local refresh = self._overlayRefresh
+        self._overlayRefresh = nil
+        refresh()
+    end
 end
 
 function bridge:_resizeOverlayToText(overlay)
@@ -1221,6 +1256,10 @@ function bridge:_hideOverlay()
     self._overlayAnchorControl = nil
     self._overlaySource = nil
     self._overlayTooltipControl = nil
+    self._overlayOwnerControl = nil
+    self._overlayRefresh = nil
+    self._overlayPriceExpiresAt = nil
+    self._overlayPriceFingerprint = nil
 
     local overlay = self._overlayWindow
     if overlay and overlay.window then
@@ -1281,7 +1320,7 @@ function bridge:_positionOverlay()
             offsetY = insetY
         end
         LogTrace("Overlay anchored inside active tooltip")
-    elseif self:_isRenderableControl(self._overlayAnchorControl) then
+    elseif not self._overlayOwnerControl and not self._overlayTooltipControl and self:_isRenderableControl(self._overlayAnchorControl) then
         anchorTarget = self._overlayAnchorControl
         point = BOTTOMLEFT
         relativePoint = TOPLEFT
@@ -1407,100 +1446,75 @@ function bridge:_buildCompactOverlayLines(lines, source)
     return lines
 end
 
-function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation)
+function bridge:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation, owner)
     retryCount = tonumber(retryCount) or 0
-    if retryCount >= 6 then
-        return false
-    end
-
+    if retryCount >= 6 then return false end
     zo_callLater(function()
-        if bridge._overlayGeneration ~= generation then
-            return
-        end
-        bridge:_showOverlayLines(lines, source, tooltipControl, retryCount + 1, generation)
+        if bridge._overlayGeneration ~= generation then return end
+        bridge:_showOverlayLines(lines, source, tooltipControl, retryCount + 1, generation, owner)
     end, 40)
-
-    LogTrace("Overlay show delayed until tooltip anchor is ready")
     return true
 end
 
-function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, generation)
-    if not self.enabled then
-        return
-    end
-    if generation == nil then
+function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, generation, owner)
+    if not self.enabled or not IsInGamepadPreferredMode() then return end
+    local preparing = generation == nil
+    if preparing then
         self._overlayGeneration = (self._overlayGeneration or 0) + 1
         generation = self._overlayGeneration
+        self._overlayRefresh = nil
     elseif self._overlayGeneration ~= generation then
         return
     end
-
-    if type(lines) ~= "table" or #lines == 0 then
-        LogTrace("Overlay show skipped: no lines")
-        self:_hideOverlay()
-        return
-    end
-
+    if type(lines) ~= "table" or #lines == 0 then self:_hideOverlay();return end
     local overlay = self:_ensureOverlayWindow()
-    if not overlay or not overlay.label then
-        LogDebug("Overlay show failed: overlay or label missing")
+    if not overlay or not overlay.label then return end
+    if preparing then
+        -- A replacement/pending request must not expose the previous anchor.
+        overlay.window:SetHidden(true)
+        overlay.window:SetHandler("OnUpdate", nil)
+        self._overlaySource = source
+        self._overlayTooltipControl = tooltipControl
+        self._overlayOwnerControl = owner or tooltipControl
+        self._overlayPriceExpiresAt = lines.expiresAt
+        self._overlayPriceFingerprint = lines.priceFingerprint
+        local overlayLines = self:_buildCompactOverlayLines(lines, source)
+        local formattedLines = {}
+        for i = 1, #overlayLines do
+            local line = overlayLines[i]
+            formattedLines[i] = type(line) == "string" and line:find("|c") and line or FormatTooltipLine(line)
+        end
+        local crafting = source == "furncraft"
+        if overlay.backdrop then
+            if crafting then overlay.backdrop:SetCenterColor(0, 0, 0, 0.70) end
+            overlay.backdrop:SetHidden(not crafting)
+        end
+        for _, name in ipairs({"borderTop", "borderBottom", "borderLeft", "borderRight"}) do
+            if overlay[name] then overlay[name]:SetHidden(not crafting) end
+        end
+        self:_renderOverlayLines(overlay, formattedLines)
+    end
+    -- Only geometry may change between anchor attempts. Presentation is prepared once.
+    self:_resizeOverlayToText(overlay)
+    if not self:_positionOverlay() then
+        overlay.window:SetHidden(true)
+        if not self:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation, owner) then
+            LogDebug("Overlay request cancelled: owner anchor unavailable after retries")
+            self:_hideOverlay()
+        end
         return
     end
-
-    local overlayLines = self:_buildCompactOverlayLines(lines, source)
-    local formattedLines = {}
-    for i = 1, #overlayLines do
-        local line = overlayLines[i]
-        if type(line) == "string" and line:find("|c") then
-            formattedLines[#formattedLines + 1] = line
-        else
-            formattedLines[#formattedLines + 1] = FormatTooltipLine(line)
-        end
+    if not self._onRefreshOverlay then
+        self._onRefreshOverlay = function() bridge:_refreshOverlayVisibility() end
     end
-
-    self._overlaySource = source
-    self._overlayTooltipControl = tooltipControl
-    local isFurncraft = (source == "furncraft")
-    if overlay.backdrop then
-        if isFurncraft then
-            overlay.backdrop:SetCenterColor(0, 0, 0, 0.70)
-            overlay.backdrop:SetHidden(false)
-        else
-            overlay.backdrop:SetHidden(true)
-        end
-    end
-    for _, bName in ipairs({ "borderTop", "borderBottom", "borderLeft", "borderRight" }) do
-        local b = overlay[bName]
-        if b then
-            b:SetHidden(not isFurncraft)
-        end
-    end
-    self:_renderOverlayLines(overlay, formattedLines)
-    self:_resizeOverlayToText(overlay)
-
-    local anchored = self:_positionOverlay()
-    if not anchored then
-        if self:_scheduleOverlayShowRetry(lines, source, tooltipControl, retryCount, generation) then
-            return
-        end
-    end
-
-    if not bridge._onRefreshOverlay then
-        bridge._onRefreshOverlay = function()
-            bridge:_refreshOverlayVisibility()
-        end
-    end
-    overlay.window:SetHandler("OnUpdate", bridge._onRefreshOverlay)
+    overlay.window:SetHandler("OnUpdate", self._onRefreshOverlay)
     overlay.window:SetHidden(false)
-    LogDebug("Overlay shown: source=%s lines=%d", source or "nil", #lines)
 end
 
-function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, listingPrice, source, craftContext)
+function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, listingPrice, source, craftContext, owner)
     if tooltip == nil or type(itemLink) ~= "string" or itemLink == "" then
         return
     end
-
-    LogTrace("_appendByLink: %.50s sc=%s price=%s", itemLink, stackCount or "nil", listingPrice or "nil")
 
     -- Coalesce only requests for the current overlay generation and owner.
     -- Hiding or replacing the overlay must allow the same item to show again.
@@ -1520,6 +1534,9 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
     local dedupKey = itemLink .. "|" .. tostring(stackCount or "") .. "|" .. tostring(listingPrice or "") .. "|" .. tostring(source or "") .. "|" .. contextKey
     local now = GetGameTimeMilliseconds()
     if self._overlayTooltipControl == tooltip
+        and self._overlayOwnerControl == (owner or tooltip)
+        and tooltip._lgcmbLastPriceFingerprint == self:_getTtcCacheFingerprint()
+        and (not self._overlayPriceExpiresAt or now < self._overlayPriceExpiresAt)
         and tooltip._lgcmbLastGeneration == self._overlayGeneration
         and tooltip._lgcmbLastKey == dedupKey
         and now - (tooltip._lgcmbLastLinkTime or 0) < 200 then
@@ -1533,13 +1550,17 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
         return
     end
 
-    self:_showOverlayLines(lines, source, tooltip)
+    self:_showOverlayLines(lines, source, tooltip, nil, nil, owner)
+    self._overlayRefresh = function()
+        bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, listingPrice, source, craftContext, owner)
+    end
+    tooltip._lgcmbLastPriceFingerprint = self:_getTtcCacheFingerprint()
     tooltip._lgcmbLastKey = dedupKey
     tooltip._lgcmbLastLinkTime = now
     tooltip._lgcmbLastGeneration = self._overlayGeneration
 end
 
-function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
+function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source, owner)
     local lines = self:_buildTooltipInfoLines(bagId, slotIndex)
 
     if #lines == 0 then
@@ -1547,7 +1568,16 @@ function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
         return
     end
 
-    self:_showOverlayLines(lines, source, tooltip)
+    self:_showOverlayLines(lines, source, tooltip, nil, nil, owner)
+    local slot = {bagId=bagId, slotIndex=slotIndex}
+    local identity = self:_getSlotIdentity(slot)
+    self._overlayRefresh = function()
+        if bridge:_isCurrentActionItem(identity, slot) then
+            bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source, owner)
+        else
+            bridge:_hideOverlay()
+        end
+    end
 end
 
 -- Price lookup is limited to the selected Trading House lot; no item-ID scan.
@@ -1587,9 +1617,16 @@ function bridge:_hookTooltipPrice()
             allHooked = false
         elseif not tooltip._lgcmbBagHooksInstalled then
             -- Native tooltip controls are userdata; SecurePostHook only accepts tables.
+            -- Every manager layout clears this content, including unsupported
+            -- layouts that reuse a visible owner without a hidden event.
+            ZO_PostHook(tooltip, "ClearLines", function(control)
+                if bridge._overlayTooltipControl == control then
+                    bridge:_hideOverlay()
+                end
+            end)
             ZO_PostHook(tooltip, "LayoutBagItem", function(control, bagId, slotIndex)
                 if bridge:_canUseOverlay() then
-                    bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex, "bag")
+                    bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex, "bag", GAMEPAD_TOOLTIPS:GetTooltipContainer(kind))
                 end
             end)
             ZO_PostHookHandler(tooltip, "OnEffectivelyHidden", function(control)
@@ -1617,7 +1654,7 @@ function bridge:_hookCraftingTooltips()
             bridge:_hideOverlay()
             return
         end
-        bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, nil, nil, "furncraft", context)
+        bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, nil, nil, "furncraft", context, control)
     end
     SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip", function(creation, pattern, material, quantity, styleId, trait)
         if not bridge:_canUseOverlay() then return end
@@ -1672,7 +1709,8 @@ function bridge:_hookTradingHouseTooltip()
         end
         local price, selectedCount = bridge:_lookupTradingHouseListingPrice(itemLink, stackCount, sellerName)
         control._lgcmbLastKey = nil
-        bridge:_appendGamepadTooltipInfoByLink(control, itemLink, selectedCount or stackCount, price, "guildstore")
+        bridge:_appendGamepadTooltipInfoByLink(control, itemLink, selectedCount or stackCount, price, "guildstore", nil,
+            GAMEPAD_TOOLTIPS:GetTooltipContainer(GAMEPAD_RIGHT_TOOLTIP))
     end)
     self._tradingHouseTooltipHooked = true
     return true
@@ -1911,7 +1949,15 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
         return #capture.entries
     end
 
-    enabled = EvaluateValue(enabled, ZO_Menu, capture.contextControl)
+    if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
+        LogDebug("Unsupported top-level checkbox: requires a native mouse control")
+        return #capture.entries
+    end
+    if itemTypeValue ~= MENU_ADD_OPTION_LABEL or type(labelValue) == "function" then
+        LogDebug("Unsupported top-level menu item: requires a native mouse row")
+        return #capture.entries
+    end
+    -- Native AddMenuItem stores enabled as a value; it does not call it.
     if enabled == false then
         return #capture.entries
     end
@@ -1919,10 +1965,6 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
     local label = ResolveLabel(labelValue, capture.contextControl)
     if not label or IsDividerLabel(label) then
         return #capture.entries
-    end
-
-    if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-        label = "[ ] " .. label
     end
 
     if type(callback) ~= "function" then
@@ -1941,183 +1983,224 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
     return #capture.entries
 end
 
+-- LCM evaluates these fields against real mouse-menu rows, never bag rows.
+local function NormalizeSubmenuEntry(entry)
+    if type(entry) ~= "table" then return nil end
+    if entry.visible ~= nil and not EvaluateValue(entry.visible, ZO_Menu) then return nil end
+    local kind = entry.itemType or MENU_ADD_OPTION_LABEL
+    if kind == MENU_ADD_OPTION_HEADER then return nil end
+    local labelValue = entry.label or entry.name or entry[1]
+    if type(labelValue) == "function" or type(entry.disabled) == "function"
+        or (kind == MENU_ADD_OPTION_CHECKBOX and type(entry.checked) == "function") then
+        LogDebug("Unsupported submenu evaluator: requires a native mouse row")
+        return nil
+    end
+    if entry.disabled then return nil end
+    local label = ResolveLabel(labelValue)
+    local callback = entry.callback or entry.func or entry[2]
+    if not label or IsDividerLabel(label) or type(callback) ~= "function" then return nil end
+    local checked = not not entry.checked
+    if kind == MENU_ADD_OPTION_CHECKBOX then
+        label = string.format("[%s] %s", checked and "x" or " ", label)
+    elseif kind ~= MENU_ADD_OPTION_LABEL then
+        LogDebug("Unsupported submenu item type: %s", tostring(kind))
+        return nil
+    end
+    return {label=label, callback=function()
+        if kind == MENU_ADD_OPTION_CHECKBOX then return callback(not checked) end
+        return callback()
+    end}
+end
+
 function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, submenuCallback)
-    local submenuLabel = ResolveLabel(submenuLabelValue, capture.contextControl)
-    if not submenuLabel then
-        LogTrace("Skipped submenu with empty label")
+    if type(entries) == "function" or type(submenuLabelValue) == "function" then
+        LogDebug("Unsupported submenu builder: requires a native mouse parent")
         return #capture.entries
     end
-
-    local submenuEntries = entries
-    if type(submenuEntries) == "function" then
-        submenuEntries = EvaluateValue(submenuEntries, ZO_Menu, capture.contextControl)
+    local label = ResolveLabel(submenuLabelValue)
+    if not label or type(entries) ~= "table" then return #capture.entries end
+    if type(submenuCallback) == "function" then
+        LogDebug("Unsupported submenu parent click: requires a native mouse control")
     end
-
-    if type(submenuEntries) ~= "table" then
-        LogTrace("Skipped submenu '%s': entries is %s", submenuLabel, type(submenuEntries))
-        return #capture.entries
+    local children = {}
+    for i = 1, #entries do
+        local child = NormalizeSubmenuEntry(entries[i])
+        if child then children[#children + 1] = child end
     end
-
-    local submenuActionEntries = {}
-
-    for i = 1, #submenuEntries do
-        local entry = submenuEntries[i]
-        if type(entry) == "table" then
-            local visible = EvaluateValue(entry.visible, ZO_Menu, capture.contextControl)
-            if visible ~= false then
-                local disabled = EvaluateValue(entry.disabled or false, ZO_Menu, capture.contextControl)
-                if not disabled then
-                    local itemTypeValue = entry.itemType or MENU_ADD_OPTION_LABEL
-                    if itemTypeValue ~= MENU_ADD_OPTION_HEADER then
-                        local childLabel = ResolveLabel(entry.label or entry.name or entry[1], capture.contextControl)
-                        if childLabel and not IsDividerLabel(childLabel) then
-                            local checked
-                            if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-                                checked = not not EvaluateValue(entry.checked or false, ZO_Menu, capture.contextControl)
-                                childLabel = string.format("[%s] %s", checked and "x" or " ", childLabel)
-                            end
-
-                            local callback = entry.callback or entry.func or entry[2]
-                            if type(callback) == "function" then
-                                submenuActionEntries[#submenuActionEntries + 1] = {
-                                    label = childLabel,
-                                    callback = function()
-                                        if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-                                            callback(not checked)
-                                        else
-                                            callback()
-                                        end
-                                    end,
-                                }
-                            end
-                        end
-                    end
-                end
-            end
-        end
+    if #children > 0 then
+        capture.entries[#capture.entries + 1] = {kind="submenu", label=label, entries=children}
     end
-
-    if #submenuActionEntries == 0 and type(submenuCallback) ~= "function" then
-        LogTrace("Skipped submenu '%s': no visible actions", submenuLabel)
-        return #capture.entries
-    end
-
-    capture.entries[#capture.entries + 1] = {
-        kind = "submenu",
-        label = submenuLabel,
-        entries = submenuActionEntries,
-        callback = type(submenuCallback) == "function" and function()
-            submenuCallback()
-        end or nil,
-    }
-    LogTrace("Captured submenu: %s (%d items)", submenuLabel, #submenuActionEntries)
-
     return #capture.entries
 end
 
-function bridge:_beginCapture(lcm)
-    local capture = {
-        entries = {},
-        originals = {},
-        contextControl = nil,
-    }
+-- Each replacement is journaled before assignment, including an absent field.
+-- The caller owns the journal before setup starts, so partial setup can unwind.
+local function ReplaceCaptured(capture, target, key, value)
+    capture.journal[#capture.journal + 1] = {target=target, key=key, value=rawget(target, key)}
+    target[key] = value
+end
 
-    capture.originals.AddMenuItem = AddMenuItem
-    capture.originals.AddCustomMenuItem = AddCustomMenuItem
-    capture.originals.AddCustomSubMenuItem = AddCustomSubMenuItem
-    capture.originals.AddCustomMenuTooltip = AddCustomMenuTooltip
-    capture.originals.ShowMenu = ShowMenu
-    capture.originals.ClearMenu = ClearMenu
-
-    _G.AddMenuItem = function(mytext, myfunction, itemType, myFont, normalColor, highlightColor, itemYPad, horizontalAlignment, isHighlighted, onEnter, onExit, enabled)
-        return bridge:_captureMenuEntry(capture, mytext, myfunction, itemType, enabled)
-    end
-
-    _G.AddCustomMenuItem = _G.AddMenuItem
-
-    _G.AddCustomSubMenuItem = function(mytext, entries, myfont, normalColor, highlightColor, itemYPad, callback)
-        return bridge:_captureSubMenuEntries(capture, mytext, entries, callback)
-    end
-
-    _G.AddCustomMenuTooltip = function()
-        return nil
-    end
-
-    _G.ShowMenu = function()
-        return nil
-    end
-
-    _G.ClearMenu = function()
-        return nil
-    end
-
-    do
-        capture.originals.LibAddMenuItem = lcm.AddMenuItem
-        lcm.AddMenuItem = function(...)
-            return _G.AddMenuItem(...)
+function bridge:_beginCapture(lcm, capture)
+    capture = capture or {entries={}, journal={}}
+    local function MenuItem(text, callback, kind, font, normal, highlight, pad, alignment, highlighted, onEnter, onExit, enabled)
+        if capture.nativeAdding then
+            local native = capture.nativeAdding
+            native._contextMenuRows[native.m_slotActions[#native.m_slotActions]] = true
+            return #capture.entries
         end
+        return bridge:_captureMenuEntry(capture, text, callback, kind, enabled)
     end
-
+    ReplaceCaptured(capture, _G, "AddMenuItem", MenuItem)
+    ReplaceCaptured(capture, _G, "AddCustomMenuItem", MenuItem)
+    ReplaceCaptured(capture, _G, "AddCustomSubMenuItem", function(text, entries, font, normal, highlight, pad, callback)
+        return bridge:_captureSubMenuEntries(capture, text, entries, callback)
+    end)
+    ReplaceCaptured(capture, _G, "ClearMenu", function()
+        -- Only menu rows are cleared; identity and transaction state survive.
+        for i = #capture.entries, 1, -1 do capture.entries[i] = nil end
+        local facade = capture.actionFacade
+        if facade then
+            for action, emitted in pairs(facade._contextMenuRows) do
+                if emitted then facade._contextMenuRows[action] = false end
+            end
+        end
+    end)
+    for _, key in ipairs({"AddCustomMenuTooltip", "ShowMenu"}) do
+        ReplaceCaptured(capture, _G, key, function() end)
+    end
+    ReplaceCaptured(capture, lcm, "AddMenuItem", MenuItem)
     return capture
 end
 
 function bridge:_endCapture(lcm, capture)
-    if not capture or not capture.originals then
-        return
-    end
-
-    _G.AddMenuItem = capture.originals.AddMenuItem
-    _G.AddCustomMenuItem = capture.originals.AddCustomMenuItem
-    _G.AddCustomSubMenuItem = capture.originals.AddCustomSubMenuItem
-    _G.AddCustomMenuTooltip = capture.originals.AddCustomMenuTooltip
-    _G.ShowMenu = capture.originals.ShowMenu
-    _G.ClearMenu = capture.originals.ClearMenu
-
-    if capture.originals.LibAddMenuItem then
-        lcm.AddMenuItem = capture.originals.LibAddMenuItem
+    for i = #capture.journal, 1, -1 do
+        local entry = capture.journal[i]
+        -- Raw restoration cannot trigger the setter that made setup fail.
+        rawset(entry.target, entry.key, entry.value)
     end
 end
 
-function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
-    if self._isCapturing then
-        return {}
+local function CopyActionState(value, seen)
+    if type(value) ~= "table" then return value end
+    if seen[value] then return seen[value] end
+    local copy = {}
+    seen[value] = copy
+    for key, entry in pairs(value) do copy[key] = CopyActionState(entry, seen) end
+    return setmetatable(copy, getmetatable(value))
+end
+
+local function CreateActionFacade(slotActions, capture)
+    local facade = {}
+    for key, value in pairs(slotActions) do facade[key] = value end
+    local seen = {}
+    facade.m_slotActions = CopyActionState(slotActions.m_slotActions or {}, seen)
+    facade.m_keybindActions = CopyActionState(slotActions.m_keybindActions or {}, seen)
+    facade.m_contextMenuMode = true
+    facade._contextMenuRows = {}
+    facade._originalActions = {}
+    for original, copy in pairs(seen) do facade._originalActions[copy] = original end
+    -- Inherit the actual native/third-party methods: add/read/clear/adjust all
+    -- operate on the same isolated arrays, not an append-only imitation.
+    setmetatable(facade, getmetatable(slotActions))
+    local add = slotActions.AddSlotAction
+    facade.AddSlotAction = function(self, ...)
+        capture.nativeAdding = self
+        local result = add(self, ...)
+        capture.nativeAdding = false
+        local action = self.m_slotActions[#self.m_slotActions]
+        if self._contextMenuRows[action] == nil then self._contextMenuRows[action] = false end
+        return result
     end
+    return facade
+end
+
+function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
+    if self._isCapturing then return {} end
+    local capture = {entries={}, journal={}, contextControl=inventorySlot}
+    local registry, originalDepth, activeCategory
     self._isCapturing = true
-    local capture = self:_beginCapture(lcm)
-    capture.contextControl = inventorySlot
-    local originalGetSlotType = ZO_InventorySlot_GetType
-    local originalContextMenuMode = slotActions.m_contextMenuMode
-    local registry = self:_readContextMenuRegistry()
-    local originalDepth = registry:GetFireCallbackDepth()
-    local activeCategory
-    -- Cleanup only: restore the temporary globals, then propagate the original
-    -- traceback to ESO's error UI instead of swallowing callback failures.
     local ok, err = xpcall(function()
-        ZO_InventorySlot_GetType = function(slot)
-            local slotType = originalGetSlotType(slot)
-            return slot == inventorySlot and bridge:_resolveNormalizedSlotType(slot, slotType) or slotType
-        end
-        slotActions.m_contextMenuMode = true
+        self:_beginCapture(lcm, capture)
+        local originalGetSlotType = ZO_InventorySlot_GetType
+        ReplaceCaptured(capture, _G, "ZO_InventorySlot_GetType", function(slot)
+            local kind = originalGetSlotType(slot)
+            return slot == inventorySlot and bridge:_resolveNormalizedSlotType(slot, kind) or kind
+        end)
+        registry = self:_readContextMenuRegistry()
+        originalDepth = registry:GetFireCallbackDepth()
+        capture.entries.identity = self:_getSlotIdentity(inventorySlot)
+        local facade = CreateActionFacade(slotActions, capture)
+        capture.actionFacade = facade
         for category = lcm.CATEGORY_EARLY, lcm.CATEGORY_LATE do
             activeCategory = category
-            registry:FireCallbacks(category, inventorySlot, slotActions)
+            registry:FireCallbacks(category, inventorySlot, facade)
         end
+        capture.entries.nativeState = facade
     end, debug.traceback)
-    slotActions.m_contextMenuMode = originalContextMenuMode
-    ZO_InventorySlot_GetType = originalGetSlotType
     self:_endCapture(lcm, capture)
     self._isCapturing = false
     if not ok then
-        registry.fireCallbackDepth = originalDepth
-        if activeCategory then
-            registry:Clean(activeCategory)
+        if registry and originalDepth ~= nil then
+            registry.fireCallbackDepth = originalDepth
+            if activeCategory then registry:Clean(activeCategory) end
         end
         error(err, 0)
     end
     return capture.entries
 end
 
+local function SameActionState(left, right, seen)
+    if left == right then return true end
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    seen = seen or {}
+    if seen[left] then return seen[left] == right end
+    seen[left] = right
+    for key, value in pairs(left) do
+        if not SameActionState(value, right[key], seen) then return false end
+    end
+    for key in pairs(right) do if left[key] == nil then return false end end
+    return true
+end
+
+function bridge:_mergeNativeActions(slotActions, state, identity, inventorySlot)
+    local function GuardChanged(rows)
+        for _, action in pairs(rows) do
+            local original = state._originalActions[action]
+            if not original or not SameActionState(action, original) then
+                local callback, visible = action[2], action[4]
+                action[2] = function()
+                    if bridge:_isCurrentActionItem(identity, inventorySlot) and (not visible or visible()) then
+                        return callback()
+                    end
+                    LogDebug("Skipped stale or hidden native context action")
+                end
+            end
+        end
+    end
+    -- Native AddSlotAction stores silent/hidden rows for reads/keybinds, but
+    -- does not emit them into a context menu. Keep that distinction when
+    -- translating the new context rows into the gamepad dialog's flat array.
+    local contextRows = {}
+    for _, action in ipairs(state.m_slotActions) do
+        if state._contextMenuRows[action] ~= false then contextRows[#contextRows + 1] = action end
+    end
+    state.m_slotActions = contextRows
+    GuardChanged(state.m_slotActions)
+    GuardChanged(state.m_keybindActions)
+    slotActions.m_slotActions = state.m_slotActions
+    slotActions.m_keybindActions = state.m_keybindActions
+    slotActions.m_inventorySlot = state.m_inventorySlot
+    slotActions.m_hasActions = state.m_hasActions
+    slotActions.m_numContextMenuActions = state.m_numContextMenuActions
+end
+
 function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
+    local identity = entries.identity
+    if not entries.nativeState then identity = self:_getSlotIdentity(inventorySlot) end
+    if entries.nativeState then
+        if not self:_isCurrentActionItem(identity, inventorySlot) then return end
+        self:_mergeNativeActions(slotActions, entries.nativeState, identity, inventorySlot)
+    end
     local knownNames = CollectExistingActionNames(slotActions)
     local addedCount = 0
 
@@ -2135,7 +2218,12 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
         knownNames[label] = true
         local actionName = bridge:_ensureActionStringId(label)
         -- Keep this nil for compatibility with gamepad action dialogs that derive labels from raw action metadata.
-        slotActions:AddSlotAction(actionName, callback, nil)
+        slotActions:AddSlotAction(actionName, function()
+            if bridge:_isCurrentActionItem(identity, inventorySlot) then
+                return callback()
+            end
+            LogDebug("Skipped stale context action: %s", label)
+        end, nil)
         StampActionLabel(slotActions, label)
         addedCount = addedCount + 1
     end
@@ -2200,6 +2288,10 @@ function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
         end
     end
 
+    -- This native read completes LCM's pending keybind categories against the
+    -- live actions before we snapshot them. Inherited AddSlotAction prehooks
+    -- must not advance that lifecycle inside the isolated context transaction.
+    slotActions:GetPrimaryActionName()
     local capturedEntries = self:_runContextCallbacks(LibCustomMenu, inventorySlot, slotActions)
 
     if #capturedEntries == 0 then
@@ -2213,22 +2305,16 @@ function bridge:_hookDiscoverSlotActions()
     if self._discoverHooked then
         return
     end
-    SecurePostHook("ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
+    SecurePostHook(_G, "ZO_InventorySlot_DiscoverSlotActionsFromActionList", function(inventorySlot, slotActions)
         bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
     end)
     self._discoverHooked = true
 end
 
 function bridge:_hookRefreshKeybindStrip()
-    if self._refreshHooked then
-        return
-    end
-    SecurePostHook(ZO_ItemSlotActionsController, "RefreshKeybindStrip", function(controller)
-        if controller.inventorySlot then
-            bridge:_tryInjectGamepadContextActions(controller.inventorySlot, controller.slotActions)
-        end
-    end)
-    self._refreshHooked = true
+    -- RebuildActions already invokes discovery before RefreshKeybindStrip.
+    -- A refresh is presentation-only, including when the builder returned empty.
+    -- Keep the private entrypoint for callers, but never redispatch from here.
 end
 
 function bridge:Initialize()

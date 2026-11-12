@@ -1,0 +1,40 @@
+[b]AI disclosure:[/b] AI was used to generate and refactor code and documentation, through Hermes Agent using an OpenAI model. Author and maintainer: Azmail.
+
+[b]LibGamepadContextMenuBridge[/b]
+
+Use inventory actions from compatible keyboard/mouse addons in ESO's gamepad item-action menu. The bridge works with addons that register these actions through LibCustomMenu.
+
+[b]Features[/b]
+[list]
+[*]Compatible inventory actions, with supported submenu entries shown as Parent: Child.
+[*]Checkbox toggles within supported submenus.
+[*]Mark and unmark eligible items as junk.
+[*]Optional TTC prices, vendor value and item-status information.
+[*]Crafting material cost estimates. Missing prices are marked as incomplete; comparisons are not net profit.
+[*]Separate account-wide settings for EU and NA.
+[/list]
+
+[b]Requirements and installation[/b]
+[list]
+[*]Required: LibCustomMenu 7.3.0 or newer (AddOnVersion 730 or newer).
+[*]Optional: LibAddonMenu-2.0 for the settings panel.
+[*]Optional: Tamriel Trade Centre and its price data for market prices and material cost estimates.
+[/list]
+Install these separately. Place the LibGamepadContextMenuBridge folder in ESO's live/AddOns directory, then enable it and LibCustomMenu in the addon list.
+
+With LibAddonMenu: Settings > Addon Settings > LibGamepadContextMenuBridge.
+Without it: /lgcmb on or /lgcmb off. Use /lgcmb status to check the current state.
+
+[b]Compatibility and test status[/b]
+For the desktop client, targeting ESO API 101051. Console support is not claimed.
+
+Submenu entries appear as flat actions, not nested menus. Headers, dividers and disabled actions are omitted. Some mouse-only actions are not supported: clicks on submenu titles, top-level checkboxes and dynamically built submenu entries. The bridge does not convert arbitrary keyboard interfaces.
+
+[b]1.5.5 is a beta build. It has been tested locally, but still needs testing in ESO.[/b] Compatibility with every LibCustomMenu addon is not guaranteed.
+
+For a problem report, include the bridge and affected addon versions, the item/menu involved, and the steps to reproduce it. Remove private information from screenshots.
+
+[b]Credits[/b]
+Thanks to votan (LibCustomMenu), sirinsidiator (LibAddonMenu-2.0), cyxui / TamrielTradeCentre.com (TTC), ESOUI / ZeniMax Online Studios (UI source and documentation), and Baertram (review feedback). Full credits are in CREDITS.md in the addon folder. Dependencies are separate projects and are not bundled.
+
+This add-on is not created by, affiliated with, or sponsored by ZeniMax Media Inc. or its affiliates.

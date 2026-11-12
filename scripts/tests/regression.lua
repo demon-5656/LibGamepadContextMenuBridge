@@ -35,18 +35,29 @@ local function fresh()
     BAG_BACKPACK, BAG_BANK, BAG_SUBSCRIBER_BANK, BAG_GUILDBANK, BAG_VIRTUAL = 1, 2, 3, 4, 5
     SLOT_TYPE_ITEM, SLOT_TYPE_BANK_ITEM, SLOT_TYPE_GUILD_BANK_ITEM = 10, 11, 12
     IsInGamepadPreferredMode = function() return true end
+    GetGameTimeMilliseconds = function() return 1000 end
+    GetItemUniqueId = function(bag, slot) return tostring(bag) .. ":" .. tostring(slot) end
+    Id64ToString = function(id) return id end
+    IsItemJunk, IsItemPlayerLocked = function() return false end, function() return false end
+    CanItemBeMarkedAsJunk = function() return false end
+    GetRecipeResultQuantity = function() return 1 end
+    ZO_CurrencyControl_FormatCurrency = function(value) return tostring(value) end
     INTERACTION_TRADINGHOUSE, CRAFTING_TYPE_INVALID = 77, 0
     GetInteractionType, GetCraftingInteractionType = function() return 0 end, function() return 0 end
     GetWorldName = function() return "EU Megaserver" end
     GetDisplayName = function() return "@fixture" end
     LibCustomMenu = { DIVIDER = "-" }
-    MENU_ADD_OPTION_LABEL, MENU_ADD_OPTION_HEADER, MENU_ADD_OPTION_CHECKBOX = 1, 2, 3
+    MENU_ADD_OPTION_LABEL, MENU_ADD_OPTION_HEADER, MENU_ADD_OPTION_CHECKBOX = 1, 100, 2
     LINK_STYLE_DEFAULT = 0
-    ITEM_LINK_TYPE = "item"
+    ITEM_LINK_TYPE = "item" -- String token used by ZO_LinkHandler, not GetLinkType.
+    LINK_TYPE_INVALID, LINK_TYPE_ITEM, LINK_TYPE_COLLECTIBLE = 0, 1, 2
     SI_TOOLTIP_ITEM_NAME = "tooltip_item_name"
     GetLinkType = function(link)
         check(type(link) == "string", "GetLinkType requires a string")
-        return link:match("|H%d+:([^:]+):") or ""
+        local token = link:match("|H%d+:([^:]+):")
+        if token == "item" then return LINK_TYPE_ITEM end
+        if token == "collectible" then return LINK_TYPE_COLLECTIBLE end
+        return LINK_TYPE_INVALID
     end
     GetItemLinkItemId = function(link)
         check(type(link) == "string", "GetItemLinkItemId requires a string")
@@ -83,7 +94,7 @@ local function fresh()
     end
     GetString = function(id) assert(strings[id], "unknown string ID"); return strings[id] end
     ZO_Inventory_GetBagAndIndex = function(slot) return slot.bagId, slot.slotIndex end
-    TamrielTradeCentrePrice, LibAddonMenu2 = nil, nil
+    TamrielTradeCentrePrice, TamrielTradeCentre, LibAddonMenu2 = nil, nil, nil
     dofile(source)
     return LibGamepadContextMenuBridge
 end
@@ -93,6 +104,8 @@ local function contains(lines, value)
     end
     return false
 end
+
+if arg[2] == "helpers" then return { fresh=fresh, check=check, contains=contains } end
 
 -- 1. Both failing and successful action callbacks execute once, with no arguments.
 do
@@ -176,7 +189,7 @@ do
         local slot, actions = {}, { m_contextMenuMode = false }
         local builder = function(gotSlot, gotActions)
             runs = runs + 1
-            check(gotSlot == slot and gotActions == actions, "builder args incorrect")
+            check(gotSlot == slot and gotActions ~= actions, "builder must receive an isolated native-compatible facade")
             check(gotActions.m_contextMenuMode == true, "context mode not set during capture")
             if outcome == "entry" or outcome == "partial-error" then AddCustomMenuItem("Action", function() end) end
             if outcome == "error" or outcome == "partial-error" then error("intentional builder failure") end
@@ -219,7 +232,7 @@ do
         function actions:AddSlotAction(name, callback)
             self.m_slotActions[#self.m_slotActions + 1] = { GetString(name), callback }
         end
-        b:_appendEntriesToSlotActions(actions, capture.entries, {})
+        b:_appendEntriesToSlotActions(actions, capture.entries, {bagId=BAG_BACKPACK,slotIndex=1})
         return actions.m_slotActions
     end
     local parents, children = 0, 0
@@ -227,21 +240,17 @@ do
         check(select("#", ...) == 0, "child received context")
         children = children + 1
     end } }, function(...) check(select("#", ...) == 0, "parent received context"); parents = parents + 1 end)
-    check(#rows == 2, "parent action lost")
-    rows[2][2]()
-    check(children == 1 and parents == 0, "child triggered parent")
+    check(#rows == 1, "unsupported mouse parent was exposed")
     rows[1][2]()
-    check(parents == 1 and children == 1, "parent triggered child")
+    check(children == 1 and parents == 0, "child triggered unsupported parent")
     rows = actionsFor({ { label = "Child", callback = function() end } })
     check(#rows == 1, "unexpected synthetic parent action")
     rows = actionsFor({}, function() parents = parents + 1 end)
-    check(#rows == 1, "parent-only submenu lost")
-    rows[1][2]()
-    check(parents == 2, "parent-only action not executable")
+    check(#rows == 0 and parents == 0, "control-dependent parent-only submenu must be omitted")
     for _, initial in ipairs({ false, true }) do
         local received, count
         rows = actionsFor({ { label = "Checkbox", itemType = MENU_ADD_OPTION_CHECKBOX,
-            checked = function() return initial end,
+            checked = initial,
             callback = function(...) count = select("#", ...); received = ... end } })
         check(#rows == 1, "checkbox entry lost")
         rows[1][2]()
@@ -256,7 +265,6 @@ do
     local b = fresh()
     local prices, ingredients = {}, {}
     b._collectRecipeIngredients = function() return ingredients end
-    b._itemIdFromLink = function() return nil end
     b._getItemLinkQualityHex = function() return "FFFFFF" end
     b._formatCompactTooltipCurrency = function(_, n) return tostring(n) end
     b._getTtcPriceInfo = function(_, link) return prices[link] end
@@ -276,15 +284,18 @@ do
     check(displayed == 8, "detail rows exceed UI cap")
     -- Unknown price outside the visible rows must still invalidate the comparison.
     prices[ingredients[9].itemLink] = nil
+    b._tooltipTtcCache, b._tooltipTtcCacheSize = {}, 0
     lines = b:_buildCraftMaterialCostLines(result, context)
     check(contains(lines, "partial (8/9 priced"), "partial estimate not labelled")
     check(not contains(lines, "vs crafted:") and not contains(lines, "Mat total:"), "partial estimate treated as complete")
     prices = { [result] = { SuggestedPrice = 200 } }
+    b._tooltipTtcCache, b._tooltipTtcCacheSize = {}, 0
     lines = b:_buildCraftMaterialCostLines(result, context)
     check(contains(lines, "incomplete (no pricing)") and not contains(lines, "vs crafted:"), "missing-price estimate misleading")
     ingredients = { ingredients[1], ingredients[2] }
     prices[ingredients[1].itemLink], prices[ingredients[2].itemLink] = { SuggestedPrice = 10 }, { SuggestedPrice = 20 }
     ingredients[2].quantity = 2
+    b._tooltipTtcCache, b._tooltipTtcCacheSize = {}, 0
     lines = b:_buildCraftMaterialCostLines(result, context)
     check(contains(lines, "Mat total: 50") and contains(lines, "vs crafted: +150"), "complete recipe calculation incorrect")
     print("PASS material estimates")
@@ -395,7 +406,7 @@ do
             meta = {}
             debug.setmetatable(control, meta)
         end
-        local fields = { handlers={}, LayoutBagItem=function() return "bag result" end,
+        local fields = { handlers={}, ClearLines=function() end, LayoutBagItem=function() return "bag result" end,
             LayoutGuildStoreSearchResult=function() return "store result" end }
         meta.__index, meta.__newindex = fields, fields
         return control
@@ -403,14 +414,16 @@ do
     GAMEPAD_LEFT_TOOLTIP, GAMEPAD_RIGHT_TOOLTIP, GAMEPAD_MOVABLE_TOOLTIP = 11, 12, 13
     local left, right, movable = tooltip(), tooltip(), tooltip()
     local pool = { [11]=left, [13]=movable }
-    GAMEPAD_TOOLTIPS = { GetTooltip=function(_, kind) return pool[kind] end }
+    local containers = { [11]={}, [12]={}, [13]={} }
+    GAMEPAD_TOOLTIPS = { GetTooltip=function(_, kind) return pool[kind] end,
+        GetTooltipContainer=function(_, kind) return containers[kind] end }
     check(not b:_hookTooltipPrice(), "partial tooltip installation reported complete")
     pool[12] = right
     check(b:_hookTooltipPrice(), "late tooltip was not hooked")
     check(hookCounts[left].LayoutBagItem == 1 and hookCounts[right].LayoutBagItem == 1, "existing target hooked twice")
     local bagCalls = 0
-    b._appendGamepadTooltipInfo = function(_, tip, bag, slot)
-        check(tip == left and bag == 1 and slot == 8, "bag hook forwarded wrong parameters")
+    b._appendGamepadTooltipInfo = function(_, tip, bag, slot, sourceName, owner)
+        check(tip == left and bag == 1 and slot == 8 and sourceName == "bag" and owner == containers[11], "bag hook must forward its explicit native container")
         bagCalls = bagCalls + 1
     end
     check(type(left) == "userdata", "tooltip fixture no longer models a native control")
@@ -421,8 +434,8 @@ do
         check(link == "|H1:item:704|hlisting|h" and count == 4 and seller == "seller", "store hook lost listing identity")
         return 80, 4
     end
-    b._appendGamepadTooltipInfoByLink = function(_, tip, link, count, price, sourceName)
-        check(tip == right and count == 4 and price == 80 and sourceName == "guildstore", "store hook forwarded wrong context")
+    b._appendGamepadTooltipInfoByLink = function(_, tip, link, count, price, sourceName, context, owner)
+        check(tip == right and count == 4 and price == 80 and sourceName == "guildstore" and owner == containers[12], "store hook must forward its explicit native container")
         storeCalls = storeCalls + 1
     end
     check(b:_hookTradingHouseTooltip(), "native Trading House tooltip was not hooked")
@@ -440,8 +453,8 @@ do
     ZO_GamepadEnchanting = {UpdateTooltip=function() end}
     SMITHING, GAMEPAD_SMITHING = nil, nil -- Not owners of these result-tooltip instances.
     local shown = {}
-    b._appendGamepadTooltipInfoByLink = function(_, tip, link, _, _, sourceName, context)
-        shown[#shown + 1] = {tip=tip,link=link,source=sourceName,context=context}
+    b._appendGamepadTooltipInfoByLink = function(_, tip, link, _, _, sourceName, context, owner)
+        shown[#shown + 1] = {tip=tip,link=link,source=sourceName,context=context,owner=owner}
     end
     GetSmithingPatternResultLink = function(pattern, material, quantity, style, trait, linkStyle)
         check(pattern == 3 and material == 2 and quantity == 150 and style == 11 and trait == 4 and linkStyle == LINK_STYLE_DEFAULT,
@@ -458,9 +471,9 @@ do
     check(b:_hookCraftingTooltips(),"gamepad crafting hooks not installed")
     ZO_GamepadSmithingCreation.SetupResultTooltip(smithing,3,2,150,11,4)
     check(#shown == 1 and shown[1].tip == smithing.resultTooltip.tip and shown[1].context.materialQuantity == 150
-        and shown[1].context.forceSmithingPatternMaterials,"smithing hook lost its real tooltip/quantity")
+        and shown[1].context.forceSmithingPatternMaterials and shown[1].owner == smithing.resultTooltip,"smithing hook lost its real tooltip/quantity/owner")
     ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,{recipeListIndex=2,recipeIndex=3})
-    check(#shown == 2 and shown[2].tip == provisioner.resultTooltip.tip and shown[2].context.recipeIndex == 3,
+    check(#shown == 2 and shown[2].tip == provisioner.resultTooltip.tip and shown[2].context.recipeIndex == 3 and shown[2].owner == provisioner.resultTooltip,
         "provisioner hook guessed recipe/tooltip instead of native selectedData")
     b._overlayTooltipControl = provisioner.resultTooltip.tip
     ZO_GamepadProvisioner.RefreshRecipeDetails(provisioner,nil)
@@ -469,7 +482,8 @@ do
     local enchanting = {resultTooltip=resultControl(),IsCraftable=function() return true end,GetResultItemLink=function() return "|H1:item:703|hglyph|h" end}
     ZO_GamepadAlchemy.UpdateTooltip(alchemy)
     ZO_GamepadEnchanting.UpdateTooltip(enchanting)
-    check(#shown == 4 and shown[3].tip == alchemy.tooltip.tip and shown[4].tip == enchanting.resultTooltip.tip,
+    check(#shown == 4 and shown[3].tip == alchemy.tooltip.tip and shown[4].tip == enchanting.resultTooltip.tip
+        and shown[3].owner == alchemy.tooltip and shown[4].owner == enchanting.resultTooltip,
         "alchemy/enchanting hook used a keyboard class or arbitrary tooltip pool")
     b:_hookCraftingTooltips()
     check(hookCounts[ZO_GamepadSmithingCreation].SetupResultTooltip == 1,"crafting class hooked twice")
@@ -629,6 +643,18 @@ end
 -- 13. Native link APIs handle only strings/items; item names use the ESO formatter.
 do
     local b = fresh()
+    local providerCalls = 0
+    local price = { SuggestedPrice = 123, Avg = 150, Min = 100 }
+    TamrielTradeCentrePrice = { GetPriceInfo = function(_, link)
+        providerCalls = providerCalls + 1
+        check(link == "|H1:item:731:|hResult|h", "TTC received wrong item link")
+        return price
+    end }
+    check(b:_getTtcPriceInfo("|H1:item:731:|hResult|h") == price and providerCalls == 1,
+        "native numeric LinkType rejected a valid item before TTC lookup")
+    check(b:_getTtcPriceInfo(nil) == nil and b:_getTtcPriceInfo("") == nil
+        and b:_getTtcPriceInfo("|H1:collectible:42:|hTest|h") == nil and providerCalls == 1,
+        "non-item input reached TTC")
     check(b:_getItemLinkQualityHex(nil) == "B8B29A", "nil item link reached native API")
     check(b:_getItemLinkQualityHex("|H1:collectible:42:|hTest|h") == "B8B29A", "non-item link treated as item")
     check(#b:_collectRecipeIngredientsByResultLink(nil) == 0, "nil result reached native item parser")
@@ -796,7 +822,7 @@ do
     queue[1]()
     check(rendered == before, "old pending retry survived hide")
     queue[2]()
-    check(rendered == before + 1 and not hidden, "current pending retry failed")
+    check(rendered == before and not hidden, "current pending retry must reuse prepared presentation")
     print("PASS overlay debounce ownership")
 end
 
@@ -822,7 +848,7 @@ do
             local label = "menu " .. round .. " action " .. index
             entries[index] = { kind="action", label=label, callback=function() return label end }
         end
-        b:_appendEntriesToSlotActions(actions, entries, {})
+        b:_appendEntriesToSlotActions(actions, entries, {bagId=BAG_BACKPACK,slotIndex=1})
         check(#actions.m_slotActions == 6, "string reuse dropped menu entries")
         first, last = first or actions.m_slotActions, actions.m_slotActions
     end
@@ -868,8 +894,7 @@ do
     b:_appendGamepadTooltipInfoByLink({}, link, 3, 90, "guildstore")
     b:_appendGamepadTooltipInfoByLink({}, link, nil, nil, "guildstore")
     string.format = originalFormat
-    check(formats == 9 and messages[4] == "[LibGamepadContextMenuBridge] _appendByLink: " .. link .. " sc=3 price=90", "numeric trace arguments changed")
-    check(messages[5] == "[LibGamepadContextMenuBridge] _appendByLink: " .. link .. " sc=nil price=nil", "nil trace arguments changed")
+    check(formats == 5 and #messages == 3, "temporary per-layout diagnostics were not removed")
     check(#capture.entries == 3, "logging changed action capture")
     print("PASS lazy debug formatting")
 end

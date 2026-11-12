@@ -1,46 +1,47 @@
 # LibGamepadContextMenuBridge
 
-Use inventory actions from compatible keyboard/mouse addons while playing ESO with a gamepad.
+**AI disclosure:** AI was used to generate and refactor code and documentation, through Hermes Agent using an OpenAI model. Author and maintainer: **Azmail**.
 
-The bridge brings actions registered through **LibCustomMenu** into the gamepad item-action menu. Existing compatible addons do not need to be modified.
-
-## Features
-
-- Custom inventory actions in the gamepad menu.
-- Submenu actions displayed as `Parent: Child`, including checkbox actions.
-- Mark/unmark items as junk.
-- Optional TTC prices, vendor value and item-status information.
-- Crafting material cost estimates, with incomplete prices marked accordingly.
-- Separate account-wide settings for EU and NA.
+Use inventory actions from compatible keyboard/mouse addons in ESO's gamepad item-action menu.
 
 ## Requirements
 
-- **LibCustomMenu 7.3.0 or newer** (`AddOnVersion >= 730`).
+- Required: **LibCustomMenu 7.3.0 or newer** (`LibCustomMenu>=730`).
 - Optional: **LibAddonMenu-2.0** for the settings panel.
-- Optional: **Tamriel Trade Centre** and its price data for market prices.
+- Optional: **Tamriel Trade Centre and its price data** for market prices and material cost estimates.
 
-Targets the desktop client, ESO API **101051**. Version **1.5.5** is in development.
+Install these separately. The bridge targets the desktop client and ESO API **101051**; console support is not claimed.
 
-## Installation
+## What it does
 
-Place the `LibGamepadContextMenuBridge` folder in your ESO `live/AddOns` directory and enable it alongside LibCustomMenu.
+- Adds compatible inventory actions registered through LibCustomMenu.
+- Shows supported submenu entries as `Parent: Child`, including checkbox toggles.
+- Adds mark/unmark as junk for eligible items.
+- Offers optional TTC prices, vendor value and item-status information.
+- Estimates crafting material costs and marks missing prices as incomplete. Market comparisons are not net profit.
+- Keeps account-wide settings separately for EU and NA.
 
-Settings: **Settings → Addon Settings → LibGamepadContextMenuBridge**.
-Without LibAddonMenu, use `/lgcmb` for commands or `/lgcmb on` and `/lgcmb off` to toggle the bridge.
+## Install and use
 
-## Compatibility
+Place the `LibGamepadContextMenuBridge` folder in your ESO `live/AddOns` directory. Enable it and LibCustomMenu, then open the inventory in gamepad mode.
 
-Supports inventory actions registered through `LibCustomMenu:RegisterContextMenu`. It does not convert arbitrary keyboard-only interfaces. Headers, dividers and disabled actions are not shown; submenu children appear directly in the gamepad action list.
+With LibAddonMenu, open **Settings > Addon Settings > LibGamepadContextMenuBridge**. Without it, use `/lgcmb on` or `/lgcmb off`. `/lgcmb status` shows the current state.
 
-## Documentation
+## Compatibility and test status
+
+Submenu entries appear as flat actions, not nested menus. Headers, dividers and disabled actions are omitted. Some mouse-only actions are not supported: clicks on submenu titles, top-level checkboxes and dynamically built submenu entries. The bridge does not convert arbitrary keyboard interfaces.
+
+**1.5.5 is a beta build. It has been tested locally, but still needs testing in ESO.** Compatibility with every LibCustomMenu addon is not guaranteed.
+
+## More information
 
 - [Changelog](CHANGELOG.md)
-- [Addon API and commands](LibGamepadContextMenuBridge/README.md)
-- [Developer API notes](docs/API_CONTRACTS_101051.md)
-- [Roadmap](docs/PRODUCT_STRATEGY.md) · [Proposed platform API](docs/PLATFORM_SPEC.md) · [Acceptance and release](docs/ACCEPTANCE_AND_RELEASE.md)
+- [Addon README](LibGamepadContextMenuBridge/README.md) and [full credits](LibGamepadContextMenuBridge/CREDITS.md)
+- For developers: [API contracts](docs/API_CONTRACTS_101051.md) and [acceptance gates](docs/ACCEPTANCE_AND_RELEASE.md)
+- Future work, not available API: [strategy](docs/PRODUCT_STRATEGY.md) and [platform proposal](docs/PLATFORM_SPEC.md)
 
-## Author and credits
+## Credits
 
-**Azmail**. AI was used for code generation, refactoring and documentation. See [credits](LibGamepadContextMenuBridge/CREDITS.md).
+Thanks to votan (LibCustomMenu), sirinsidiator (LibAddonMenu-2.0), cyxui / TamrielTradeCentre.com (TTC), ESOUI / ZeniMax Online Studios (UI source and documentation), and Baertram (review feedback).
 
 This add-on is not created by, affiliated with, or sponsored by ZeniMax Media Inc. or its affiliates.

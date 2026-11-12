@@ -4,7 +4,7 @@
 
 Все новые методы и структуры ниже **предлагаются к реализации**. Вызывать их в текущем релизе нельзя. База анализа: commit `9c5fee6e7ee2677c062b580e78b54546bee7247a`, 11 ноября 2026 года.
 
-Навигация: [Стратегия](PRODUCT_STRATEGY.md) · [Приёмка](ACCEPTANCE_AND_RELEASE.md) · [Текущий API](../LibGamepadContextMenuBridge/README.md).
+Навигация: [Стратегия](PRODUCT_STRATEGY.md) · [Приёмка](ACCEPTANCE_AND_RELEASE.md) · [Текущие контракты](API_CONTRACTS_101051.md).
 
 ## 1. Граница задачи
 
@@ -14,7 +14,7 @@
 
 ### Уже существует
 
-- `LibGamepadContextMenuBridge:RegisterContextMenu(func, category, ...)` и `SetEnabled(enabled)`: [реализация](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua#L966).
+- `LibGamepadContextMenuBridge:RegisterContextMenu(func, category, ...)` и `SetEnabled(enabled)`: [реализация](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua).
 - Перехват подходящих регистраций LibCustomMenu и преобразование поддерживаемых записей.
 - Плоское gamepad-представление детей submenu.
 - Диагностические методы и настройки.
@@ -116,13 +116,13 @@ Provider считает контекст read-only. В Lua это не гара�
 - `enabled=false` не вызывает `execute`. Если выбранный renderer не поддерживает понятное disabled-представление, запись скрывается; поведение capability должно быть явно описано.
 - Невалидная запись пропускается с диагностикой. Остальные корректные действия других providers остаются доступны.
 
-Эти новые сигнатуры **не применяются к legacy callbacks**. Для существующих LibCustomMenu entries сохраняются их исходные правила: обычное действие без аргументов, checkbox-child с новым boolean-состоянием; самостоятельный callback родителя не является подготовкой детей.
+Эти новые сигнатуры **не применяются к legacy callbacks**. Поддерживаемый legacy label action вызывается без аргументов, submenu-checkbox child — с новым boolean-состоянием. Genuine mouse parent callback требует реальный control, top-level checkbox — control и state; в текущем review-fix эти формы и control-dependent submenu evaluators/builders не эмулируются и пропускаются с диагностикой. Наличие parent execution в предлагаемом API не обещает его поддержку старым adapter.
 
 ### Идентичность и дубли
 
 В новом API совпадение названий двух разных действий не делает их одним действием: дедупликация по ID, не по тексту. При неоднозначности UI показывает источник. Дубли одного action ID внутри ответа provider считаются ошибкой ответа с детерминированным результатом и диагностикой.
 
-Существующий legacy-путь [сравнивает имена](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua#L4265). Не обещать устранение всех коллизий старых меню без изменения и отдельной проверки adapter. Автоматически сопоставлять legacy-действие и новое действие по похожему label нельзя; стратегия миграции provider должна исключить двойную регистрацию.
+Существующий legacy-путь [сравнивает имена](../LibGamepadContextMenuBridge/LibGamepadContextMenuBridge.lua). Не обещать устранение всех коллизий старых меню без изменения и отдельной проверки adapter. Автоматически сопоставлять legacy-действие и новое действие по похожему label нельзя; стратегия миграции provider должна исключить двойную регистрацию.
 
 ## 6. Жизненный цикл и ошибки
 
@@ -159,7 +159,7 @@ Provider считает контекст read-only. В Lua это не гара�
 - Публичный changelog контракта и правила deprecated API.
 - Реальную матрицу проверенных ESO/LibCustomMenu/UI-комбинаций.
 
-Не публиковать псевдопример с новыми вызовами как готовый copy/paste-код до реализации. Текущий рабочий способ подключения описан в [addon README](../LibGamepadContextMenuBridge/README.md).
+Не публиковать псевдопример с новыми вызовами как готовый copy/paste-код до реализации. Текущие ограничения adapter описаны в [API contracts](API_CONTRACTS_101051.md); [addon README](../LibGamepadContextMenuBridge/README.md) предназначен игрокам.
 
 ## 9. Приёмка первого нового контракта
 
