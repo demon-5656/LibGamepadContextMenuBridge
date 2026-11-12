@@ -8,10 +8,54 @@ local function check(value, message)
 end
 local function fresh()
     LibGamepadContextMenuBridge = nil
-    EVENT_MANAGER = { RegisterForEvent = function() end }
+    EVENT_MANAGER = { events = {}, updates = {} }
+    function EVENT_MANAGER:RegisterForEvent(namespace, event, callback)
+        self.events[event] = self.events[event] or {}
+        self.events[event][namespace] = callback
+    end
+    function EVENT_MANAGER:UnregisterForEvent(namespace, event)
+        if self.events[event] then self.events[event][namespace] = nil end
+    end
+    function EVENT_MANAGER:RegisterForUpdate(namespace, _, callback) self.updates[namespace] = callback end
+    function EVENT_MANAGER:UnregisterForUpdate(namespace) self.updates[namespace] = nil end
+    function EVENT_MANAGER:Fire(event, ...)
+        local callbacks = {}
+        for _, callback in pairs(self.events[event] or {}) do callbacks[#callbacks + 1] = callback end
+        for _, callback in ipairs(callbacks) do callback(event, ...) end
+    end
+    function EVENT_MANAGER:Count(event)
+        local count = 0
+        for _ in pairs(self.events[event] or {}) do count = count + 1 end
+        return count
+    end
     EVENT_ADD_ON_LOADED = 1
+    EVENT_PLAYER_ACTIVATED, EVENT_GAMEPAD_PREFERRED_MODE_CHANGED = 2, 3
+    EVENT_OPEN_TRADING_HOUSE, EVENT_CLOSE_TRADING_HOUSE = 4, 5
+    EVENT_CRAFTING_STATION_INTERACT, EVENT_END_CRAFTING_STATION_INTERACT = 6, 7
+    BAG_BACKPACK, BAG_BANK, BAG_SUBSCRIBER_BANK, BAG_GUILDBANK, BAG_VIRTUAL = 1, 2, 3, 4, 5
+    SLOT_TYPE_ITEM, SLOT_TYPE_BANK_ITEM, SLOT_TYPE_GUILD_BANK_ITEM = 10, 11, 12
+    IsInGamepadPreferredMode = function() return true end
+    INTERACTION_TRADINGHOUSE, CRAFTING_TYPE_INVALID = 77, 0
+    GetInteractionType, GetCraftingInteractionType = function() return 0 end, function() return 0 end
+    GetWorldName = function() return "EU Megaserver" end
+    GetDisplayName = function() return "@fixture" end
+    LibCustomMenu = { DIVIDER = "-" }
     MENU_ADD_OPTION_LABEL, MENU_ADD_OPTION_HEADER, MENU_ADD_OPTION_CHECKBOX = 1, 2, 3
     LINK_STYLE_DEFAULT = 0
+    ITEM_LINK_TYPE = "item"
+    SI_TOOLTIP_ITEM_NAME = "tooltip_item_name"
+    GetLinkType = function(link)
+        check(type(link) == "string", "GetLinkType requires a string")
+        return link:match("|H%d+:([^:]+):") or ""
+    end
+    GetItemLinkItemId = function(link)
+        check(type(link) == "string", "GetItemLinkItemId requires a string")
+        return tonumber(link:match("|H%d+:item:(%d+):")) or 0
+    end
+    zo_strformat = function(format, value)
+        if format == SI_TOOLTIP_ITEM_NAME then return (value:gsub("%^.*$", "")) end
+        return value
+    end
     ZO_Menu = {}
     GetTimeStamp = function() return 123456 end
     d = function() end
@@ -422,7 +466,11 @@ do
     b._hookTooltipPrice = function() return false end
     b._hookCraftingTooltips = function() return false end
     b._hookTradingHouseTooltip = function() return false end
-    zo_callLater = function(fn,delay) check(delay == 2500,"wrong hook retry delay");queue[#queue+1]=fn end
+    EVENT_MANAGER.RegisterForUpdate = function(self, namespace, delay, fn)
+        check(delay == 2500,"wrong hook retry delay")
+        self.updates[namespace] = fn
+        queue[#queue+1] = fn
+    end
     b:_scheduleTooltipPriceHookRetry()
     b:_scheduleTooltipPriceHookRetry()
     check(#queue == 1,"duplicate hook retry scheduled")
@@ -439,4 +487,151 @@ do
     check(b._overlayTooltipControl == nil,"disabled overlay changed target")
     print("PASS bounded UI readiness")
 end
-print("PASS all 10 regression groups (" .. checks .. " assertions)")
+-- 11. Server profiles inherit legacy settings once, without sharing nested tables.
+do
+    local name = "LibGamepadContextMenuBridge_SavedVars"
+    local function copy(value)
+        if type(value) ~= "table" then return value end
+        local result = {}
+        for key, child in pairs(value) do result[key] = copy(child) end
+        return result
+    end
+    ZO_DeepTableCopy = copy
+    ZO_SavedVars = { NewAccountWide = function(_, key, version, namespace, defaults, profile)
+        check(key == name and version == 1 and namespace == nil and profile ~= nil, "wrong server saved-vars contract")
+        local raw = _G[key] or {}
+        _G[key] = raw
+        raw[profile] = raw[profile] or {}
+        local account = raw[profile][GetDisplayName()] or {}
+        raw[profile][GetDisplayName()] = account
+        local saved = account["$AccountWide"] or { version = version }
+        account["$AccountWide"] = saved
+        for field, value in pairs(defaults) do if saved[field] == nil then saved[field] = copy(value) end end
+        return saved
+    end }
+    local source = os.getenv("ESO_SAVEDVARS_SOURCE")
+    if source then
+        ZO_ClearTable = function(t) for key in pairs(t) do t[key] = nil end end
+        dofile(source)
+    end
+    local legacy = { version=1, enabled=true, showTtcPriceInTooltip=false, debugLog={"legacy log"} }
+    _G[name] = { Default = { ["@fixture"] = { ["$AccountWide"] = legacy } } }
+    local eu = fresh()
+    eu:_initializeSavedVars()
+    check(eu.enabled and eu.savedVars.showTtcPriceInTooltip == false, "legacy settings were lost")
+    eu:SetEnabled(false)
+    eu.savedVars.debugLog[1] = "EU only"
+    local na = fresh()
+    GetWorldName = function() return "NA Megaserver" end
+    na:_initializeSavedVars()
+    check(na.enabled and na.savedVars.debugLog[1] == "legacy log", "EU settings leaked into NA")
+    check(legacy.enabled == true and legacy.debugLog[1] == "legacy log", "migration modified legacy data")
+    local again = fresh()
+    again:_initializeSavedVars()
+    check(not again.enabled and again.savedVars.debugLog[1] == "EU only", "existing server profile overwritten on reload")
+    local slot = {bagId=BAG_SUBSCRIBER_BANK,slotIndex=2}
+    check(again:_resolveNormalizedSlotType(slot,99) == SLOT_TYPE_BANK_ITEM,"bank lookup mapping lost")
+    slot.bagId = 99
+    check(again:_resolveNormalizedSlotType(slot,99) == 99,"unknown bag lost original slot type")
+    _G[name] = nil
+    local clean = fresh()
+    clean:_initializeSavedVars()
+    check(clean.enabled and clean.savedVars.debug == false, "clean install lost defaults")
+    check(_G[name]["EU Megaserver"]["@fixture"]["$AccountWide"] ~= nil and _G[name].Default == nil,"clean install created a legacy profile")
+    print("PASS server settings migration")
+end
+
+-- 12. Addon load does not install UI hooks; close events and retries live only while needed.
+do
+    local b = fresh()
+    local gamepad = false
+    IsInGamepadPreferredMode = function() return gamepad end
+    local installs = {}
+    for _, pair in ipairs({{"_hookDiscoverSlotActions","_discoverHooked"},{"_hookRefreshKeybindStrip","_refreshHooked"},
+        {"_hookTooltipPrice","_tooltipPriceHooked"},{"_hookCraftingTooltips","_craftingTooltipsHooked"},{"_hookTradingHouseTooltip","_tradingHouseTooltipHooked"}}) do
+        local method, flag = pair[1], pair[2]
+        b[method] = function(self)
+            if not self[flag] then installs[method]=(installs[method] or 0)+1;self[flag]=true end
+            return true
+        end
+    end
+    b._initializeSavedVars = function(self) self.savedVars={enabled=true,showTtcPriceInTooltip=true,showJunkStatusInTooltip=true,showVendorPriceInTooltip=true} end
+    b._initializeSlashCommands, b._initializeSettingsPanel = function() end, function() end
+    EVENT_MANAGER:Fire(EVENT_ADD_ON_LOADED,"LibGamepadContextMenuBridge")
+    check(next(installs) == nil and next(EVENT_MANAGER.updates) == nil,"addon load eagerly installed hooks/updaters")
+    EVENT_MANAGER:Fire(EVENT_PLAYER_ACTIVATED)
+    check(next(installs) == nil and EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 0,"keyboard mode installed gamepad hooks")
+    gamepad = true
+    EVENT_MANAGER:Fire(EVENT_GAMEPAD_PREFERRED_MODE_CHANGED,true)
+    check(installs._hookDiscoverSlotActions == 1 and installs._hookCraftingTooltips == 1,"first gamepad use did not install hooks")
+    check(EVENT_MANAGER:Count(EVENT_CLOSE_TRADING_HOUSE) == 0 and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 0,"idle close events registered")
+    EVENT_MANAGER:Fire(EVENT_OPEN_TRADING_HOUSE)
+    check(EVENT_MANAGER:Count(EVENT_CLOSE_TRADING_HOUSE) == 1,"store close not registered on open")
+    EVENT_MANAGER:Fire(EVENT_CLOSE_TRADING_HOUSE)
+    check(EVENT_MANAGER:Count(EVENT_CLOSE_TRADING_HOUSE) == 0,"store close listener survived close")
+    EVENT_MANAGER:Fire(EVENT_CRAFTING_STATION_INTERACT)
+    check(b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"crafting lifecycle did not start")
+    EVENT_MANAGER:Fire(EVENT_END_CRAFTING_STATION_INTERACT)
+    check(not b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 0,"crafting lifecycle did not stop")
+    b:SetShowTtcPriceInTooltip(false);b:SetShowJunkStatusInTooltip(false);b:SetShowVendorPriceInTooltip(false)
+    check(EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 0 and EVENT_MANAGER:Count(EVENT_CRAFTING_STATION_INTERACT) == 0,"disabled overlay retained context events")
+    b:SetShowTtcPriceInTooltip(true)
+    check(EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 1,"overlay events not restored")
+    b:SetEnabled(false)
+    check(EVENT_MANAGER:Count(EVENT_GAMEPAD_PREFERRED_MODE_CHANGED) == 0 and EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 0,"disabled bridge retained runtime events")
+    GetCraftingInteractionType = function() return 1 end
+    b:SetEnabled(true)
+    check(installs._hookDiscoverSlotActions == 1 and EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 1,"re-enable duplicated hooks or lost events")
+    check(b._craftingStationActive and EVENT_MANAGER:Count(EVENT_END_CRAFTING_STATION_INTERACT) == 1,"re-enable at open station lost close listener")
+    EVENT_MANAGER:Fire(EVENT_END_CRAFTING_STATION_INTERACT)
+    GetCraftingInteractionType = function() return 0 end
+    b:SetEnabled(false)
+    GetInteractionType = function() return INTERACTION_TRADINGHOUSE end
+    b:SetEnabled(true)
+    check(EVENT_MANAGER:Count(EVENT_CLOSE_TRADING_HOUSE) == 1,"re-enable inside store lost close listener")
+    EVENT_MANAGER:Fire(EVENT_CLOSE_TRADING_HOUSE)
+    GetInteractionType = function() return 0 end
+    b._tooltipPriceHooked = false
+    b:_scheduleTooltipPriceHookRetry()
+    local retry = EVENT_MANAGER.updates.LibGamepadContextMenuBridge_TooltipHookRetry
+    check(retry ~= nil,"missing retry updater")
+    gamepad = false
+    EVENT_MANAGER:Fire(EVENT_GAMEPAD_PREFERRED_MODE_CHANGED,false)
+    check(next(EVENT_MANAGER.updates) == nil and EVENT_MANAGER:Count(EVENT_CRAFTING_STATION_INTERACT) == 0,"keyboard switch retained updater/events")
+    retry()
+    check(not b._tooltipPriceHooked,"cancelled retry installed stale hooks")
+    local disabled = fresh()
+    disabled.enabled = false
+    disabled._initializeSavedVars, disabled._initializeSlashCommands, disabled._initializeSettingsPanel = function() end, function() end, function() end
+    EVENT_MANAGER:Fire(EVENT_ADD_ON_LOADED,"LibGamepadContextMenuBridge")
+    check(EVENT_MANAGER:Count(EVENT_PLAYER_ACTIVATED) == 0 and EVENT_MANAGER:Count(EVENT_GAMEPAD_PREFERRED_MODE_CHANGED) == 0
+        and EVENT_MANAGER:Count(EVENT_OPEN_TRADING_HOUSE) == 0 and next(EVENT_MANAGER.updates) == nil,"disabled startup registered runtime work")
+    print("PASS deferred gamepad lifecycle")
+end
+-- 13. Native link APIs handle only strings/items; item names use the ESO formatter.
+do
+    local b = fresh()
+    check(b:_getItemLinkQualityHex(nil) == "B8B29A", "nil item link reached native API")
+    check(b:_getItemLinkQualityHex("|H1:collectible:42:|hTest|h") == "B8B29A", "non-item link treated as item")
+    check(#b:_collectRecipeIngredientsByResultLink(nil) == 0, "nil result reached native item parser")
+    check(#b:_collectRecipeIngredientsByResultLink("|H1:item:0:|h|h") == 0, "zero item ID queried as recipe")
+    local recipeCalls = 0
+    GetRecipeInfoFromItemId = function(id)
+        check(id == 731,"native item ID not used")
+        recipeCalls = recipeCalls + 1
+        return 1,2,3
+    end
+    b._collectRecipeIngredients = function(_, list, recipe)
+        check(list == 2 and recipe == 3,"native recipe indices lost")
+        return {{ itemLink="|H1:item:9:|hOre|h",quantity=1,name="Ore^ns" }}
+    end
+    check(#b:_collectRecipeIngredientsByResultLink("|H1:item:731:|hResult|h") == 1 and recipeCalls == 1,"recipe ID lookup not exactly once")
+    b._getItemLinkQualityHex = function() return "FFFFFF" end
+    b._getTtcPriceInfo = function() return {SuggestedPrice=1} end
+    b._formatCompactTooltipCurrency = function(_, value) return tostring(value) end
+    local lines = b:_buildCraftMaterialCostLines("|H1:item:731:|hResult|h",{recipeListIndex=2,recipeIndex=3})
+    local text = table.concat(lines,"\n")
+    check(text:find("Ore x1",1,true) and not text:find("^",1,true),"item name bypassed native grammar formatter")
+    print("PASS native item-link helpers")
+end
+print("PASS all 13 regression groups (" .. checks .. " assertions)")

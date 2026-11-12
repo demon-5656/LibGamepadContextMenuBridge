@@ -52,10 +52,18 @@ Missing prices produce a partial/incomplete estimate without a crafted-value com
 
 ## Dependencies
 - Required: `LibCustomMenu>=730`
-- Optional: `LibAddonMenu-2.0>=43` (settings panel)
+- Optional: `LibAddonMenu-2.0` (settings panel; integration checked against r43)
 - Optional for price display: `TamrielTradeCentre`
 
 The manifest targets **API 101051**. Contracts are checked against the pinned ESO UI sources; see [API verification](docs/API_CONTRACTS_101051.md).
+
+`>=730` checks the required dependency's integer `AddOnVersion`, not its display `Version`. Optional dependencies only affect load order; `>=` is not a minimum-version gate there. `PCDependsOn` and `ConsoleDependsOn` are platform-specific required dependencies, not alternative optional declarations. This addon targets the desktop client; console support is not claimed.
+
+## Settings and lifecycle
+- Settings are account-wide **per server** (`GetWorldName()`), so EU and NA can be configured independently.
+- A server's first load inherits the old shared settings, including explicit `false` values and debug history. Existing server settings and the legacy profile are preserved.
+- UI hooks are installed on first gamepad activation after readiness, not directly at addon load. Installed hooks are reused and skip work while disabled or in keyboard mode.
+- Trading House/crafting close listeners exist only during their interaction. Disabling the overlay or bridge, or returning to keyboard mode, removes overlay events and cancels the bounded readiness updater.
 
 ## Install (manual)
 Copy the folder below into your ESO AddOns directory:

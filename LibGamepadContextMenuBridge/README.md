@@ -48,11 +48,19 @@ end, LibCustomMenu.CATEGORY_LATE)
 
 ## Dependency requirements
 - `LibCustomMenu>=730`
-- Optional: `LibAddonMenu-2.0>=43` (for settings panel)
+- Optional: `LibAddonMenu-2.0` (for settings panel; integration checked against r43)
 - Optional: `TamrielTradeCentre` and its price data (for market prices).
 
 ## Compatibility
-The manifest targets ESO API **101051**. The addon remains beta. Version 1.5.4 fixes the native-tooltip startup error in 1.5.3.
+The manifest targets ESO Live API **101051**, not PTS API 101052. The addon remains beta and targets the desktop client; console support is not claimed. The native-tooltip userdata fix from 1.5.4 is retained.
+
+Required dependency minimums use the library's integer `AddOnVersion`. Optional dependencies only arrange load order and have no `>=` requirement. `PCDependsOn` / `ConsoleDependsOn` specify platform-specific required dependencies, not optional ones.
+
+## Server settings and deferred hooks
+- Settings are account-wide per server. EU and NA settings can differ.
+- Each server's first load inherits the old shared settings without deleting them; existing server settings are not overwritten.
+- Hooks are installed on first gamepad activation, not directly at addon load. Disabled/keyboard mode skips overlay work, unregisters overlay events and cancels pending hook retries.
+- Closing a Trading House or crafting interaction unregisters its close listener. Enabling the bridge during an already-open interaction also restores the matching close listener.
 
 ## Settings and Debug
 - Addon panel: `Settings -> Addon Settings -> LibGamepadContextMenuBridge` (requires `LibAddonMenu-2.0`).

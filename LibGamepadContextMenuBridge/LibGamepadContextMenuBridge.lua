@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 154
-local ADDON_VERSION = "1.5.4"
+local MINOR = 155
+local ADDON_VERSION = "1.5.5"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -35,6 +35,18 @@ bridge._templateCraftingOverlayActive = bridge._templateCraftingOverlayActive or
 
 local SAVED_VARS_NAME = MAJOR .. "_SavedVars"
 local SAVED_VARS_VERSION = 1
+local EVENT_NAMESPACE = MAJOR .. "_OnLoaded"
+local PLAYER_ACTIVATED_EVENT_NAMESPACE = MAJOR .. "_PlayerActivated"
+local MODE_EVENT_NAMESPACE = MAJOR .. "_InputMode"
+local TH_OPEN_NS, TH_CLOSE_NS = MAJOR .. "_THOpen", MAJOR .. "_THClose"
+local CRAFT_OPEN_NS, CRAFT_CLOSE_NS = MAJOR .. "_CraftOpen", MAJOR .. "_CraftClose"
+local TOOLTIP_RETRY_NS = MAJOR .. "_TooltipHookRetry"
+local BAG_ID_TO_SLOT_TYPE = {
+    [BAG_BACKPACK] = SLOT_TYPE_ITEM,
+    [BAG_BANK] = SLOT_TYPE_BANK_ITEM,
+    [BAG_SUBSCRIBER_BANK] = SLOT_TYPE_BANK_ITEM,
+    [BAG_GUILDBANK] = SLOT_TYPE_GUILD_BANK_ITEM,
+}
 local DEFAULTS = {
     enabled = true,
     debug = false,
@@ -67,14 +79,16 @@ function bridge:_addDebugHistory(message)
     end
 
     local entry = string.format("%s %s", GetDebugTimestamp(), message)
-    self._debugLog[#self._debugLog + 1] = entry
+    local debugLog = self._debugLog
+    debugLog[#debugLog + 1] = entry
 
     -- Also persist to SavedVars so the log survives /reloadui and is written to disk.
-    if self.savedVars then
-        if type(self.savedVars.debugLog) ~= "table" then
-            self.savedVars.debugLog = {}
+    local savedVars = self.savedVars
+    if savedVars then
+        if type(savedVars.debugLog) ~= "table" then
+            savedVars.debugLog = {}
         end
-        local sv = self.savedVars.debugLog
+        local sv = savedVars.debugLog
         sv[#sv + 1] = entry
         -- Keep SavedVars log bounded (max 500 lines to avoid giant file).
         local svLimit = 500
@@ -84,12 +98,12 @@ function bridge:_addDebugHistory(message)
     end
 
     local limit = DEFAULTS.maxDebugMessages
-    if self.savedVars and tonumber(self.savedVars.maxDebugMessages) then
-        limit = math.max(20, tonumber(self.savedVars.maxDebugMessages))
+    if savedVars and tonumber(savedVars.maxDebugMessages) then
+        limit = math.max(20, tonumber(savedVars.maxDebugMessages))
     end
 
-    while #self._debugLog > limit do
-        table.remove(self._debugLog, 1)
+    while #debugLog > limit do
+        table.remove(debugLog, 1)
     end
 end
 
@@ -103,12 +117,13 @@ function bridge:_debugMessage(message, verboseOnly)
     end
 
     local formatted = string.format("[%s] %s", MAJOR, tostring(message))
+    local savedVars = self.savedVars
 
-    if not self.savedVars or self.savedVars.debugStoreHistory ~= false then
+    if not savedVars or savedVars.debugStoreHistory ~= false then
         self:_addDebugHistory(formatted)
     end
 
-    if not self.savedVars or self.savedVars.debugToChat ~= false then
+    if not savedVars or savedVars.debugToChat ~= false then
         d(formatted)
     end
 end
@@ -128,8 +143,8 @@ local function EvaluateValue(value, ...)
     return value
 end
 
-local function IsValidItemLink(link)
-    return type(link) == "string" and link:find("|H") ~= nil
+local function HasItemLink(link)
+    return type(link) == "string" and GetLinkType(link) == ITEM_LINK_TYPE
 end
 
 function bridge:_makeCraftContext(patternIndex, materialIndex, materialQuantity, styleIndex, traitIndex)
@@ -179,7 +194,7 @@ local function IsDividerLabel(label)
         return true
     end
 
-    if type(LibCustomMenu) == "table" and label == LibCustomMenu.DIVIDER then
+    if label == LibCustomMenu.DIVIDER then
         return true
     end
 
@@ -242,14 +257,7 @@ function bridge:_resolveNormalizedSlotType(inventorySlot, slotType)
     if bagId == nil or slotIndex == nil then
         return slotType
     end
-    if bagId == BAG_BACKPACK then
-        return SLOT_TYPE_ITEM
-    elseif bagId == BAG_BANK or bagId == BAG_SUBSCRIBER_BANK then
-        return SLOT_TYPE_BANK_ITEM
-    elseif bagId == BAG_GUILDBANK then
-        return SLOT_TYPE_GUILD_BANK_ITEM
-    end
-    return slotType
+    return BAG_ID_TO_SLOT_TYPE[bagId] or slotType
 end
 
 function bridge:_resolveBagAndSlot(inventorySlot)
@@ -292,6 +300,7 @@ function bridge:SetEnabled(enabled)
     if not self.enabled then
         self:_hideOverlay()
     end
+    if self._initialized then self:_syncRuntime() end
     LogDebug("Bridge enabled: " .. tostring(self.enabled))
 end
 
@@ -316,6 +325,7 @@ function bridge:SetShowTtcPriceInTooltip(enabled)
     if self.savedVars then
         self.savedVars.showTtcPriceInTooltip = value
     end
+    if self._initialized then self:_syncRuntime() end
 end
 
 function bridge:SetShowTtcPriceDetailsInTooltip(enabled)
@@ -323,6 +333,7 @@ function bridge:SetShowTtcPriceDetailsInTooltip(enabled)
     if self.savedVars then
         self.savedVars.showTtcPriceDetailsInTooltip = value
     end
+    if self._initialized then self:_syncRuntime() end
 end
 
 function bridge:SetShowJunkStatusInTooltip(enabled)
@@ -330,6 +341,7 @@ function bridge:SetShowJunkStatusInTooltip(enabled)
     if self.savedVars then
         self.savedVars.showJunkStatusInTooltip = value
     end
+    if self._initialized then self:_syncRuntime() end
 end
 
 function bridge:SetShowVendorPriceInTooltip(enabled)
@@ -337,6 +349,7 @@ function bridge:SetShowVendorPriceInTooltip(enabled)
     if self.savedVars then
         self.savedVars.showVendorPriceInTooltip = value
     end
+    if self._initialized then self:_syncRuntime() end
 end
 
 function bridge:ClearDebugLog()
@@ -417,17 +430,36 @@ function bridge:_initializeSavedVars()
         return
     end
 
-    self.savedVars = ZO_SavedVars:NewAccountWide(SAVED_VARS_NAME, SAVED_VARS_VERSION, nil, DEFAULTS)
-    self.enabled = self.savedVars.enabled ~= false
-    self.debug = self.savedVars.debug == true
-    self.debugVerbose = self.savedVars.debugVerbose == true
+    local world = GetWorldName()
+    local raw = _G[SAVED_VARS_NAME]
+    local account = GetDisplayName()
+    local worldAccount = raw and raw[world] and raw[world][account]
+    local legacyAccount = raw and raw.Default and raw.Default[account]
+    local legacy = legacyAccount and legacyAccount["$AccountWide"]
+    local defaults = DEFAULTS
+    -- Seed each new server profile, preserving the shared legacy settings and
+    -- any server profile that the player already configured.
+    if not (worldAccount and worldAccount["$AccountWide"]) and legacy and legacy.version == SAVED_VARS_VERSION then
+        defaults = ZO_DeepTableCopy(DEFAULTS)
+        for key in pairs(DEFAULTS) do
+            local value = legacy[key]
+            if value ~= nil then
+                defaults[key] = type(value) == "table" and ZO_DeepTableCopy(value) or value
+            end
+        end
+    end
+    local savedVars = ZO_SavedVars:NewAccountWide(SAVED_VARS_NAME, SAVED_VARS_VERSION, nil, defaults, world)
+    self.savedVars = savedVars
+    self.enabled = savedVars.enabled ~= false
+    self.debug = savedVars.debug == true
+    self.debugVerbose = savedVars.debugVerbose == true
     -- Restore in-memory log from persisted SavedVars log.
-    if type(self.savedVars.debugLog) == "table" then
-        for _, v in ipairs(self.savedVars.debugLog) do
+    if type(savedVars.debugLog) == "table" then
+        for _, v in ipairs(savedVars.debugLog) do
             self._debugLog[#self._debugLog + 1] = v
         end
     else
-        self.savedVars.debugLog = {}
+        savedVars.debugLog = {}
     end
     LogTrace("SavedVars loaded")
 end
@@ -454,7 +486,7 @@ end
 
 function bridge:_getTtcPriceInfo(itemLink)
     -- TTC is optional; once loaded, use its documented public price provider.
-    if not TamrielTradeCentrePrice or not IsValidItemLink(itemLink) then
+    if not TamrielTradeCentrePrice or not HasItemLink(itemLink) then
         return nil
     end
     return TamrielTradeCentrePrice:GetPriceInfo(itemLink)
@@ -591,7 +623,7 @@ function bridge:_isBoundItem(bagId, slotIndex, itemLink)
     if bagId ~= nil and slotIndex ~= nil then
         return IsItemBound(bagId, slotIndex)
     end
-    return IsValidItemLink(itemLink) and IsItemLinkBound(itemLink) or false
+    return HasItemLink(itemLink) and IsItemLinkBound(itemLink) or false
 end
 
 function bridge:_buildTooltipInfoLines(bagId, slotIndex)
@@ -726,7 +758,7 @@ local function FirstPositiveNumber(...)
 end
 
 function bridge:_getItemLinkQualityHex(itemLink)
-    if not IsValidItemLink(itemLink) then
+    if not HasItemLink(itemLink) then
         return "B8B29A"
     end
     local quality = GetItemLinkDisplayQuality(itemLink)
@@ -746,25 +778,19 @@ function bridge:_collectRecipeIngredients(recipeListIndex, recipeIndex)
         local quantity = GetRecipeIngredientRequiredQuantity(recipeListIndex, recipeIndex, i)
         if quantity and quantity > 0 then
             ingredients[#ingredients + 1] = {
-                itemLink = IsValidItemLink(link) and link or nil,
+                itemLink = HasItemLink(link) and link or nil,
                 quantity = quantity,
-                name = IsValidItemLink(link) and GetItemLinkName(link) or nil,
+                name = HasItemLink(link) and GetItemLinkName(link) or nil,
             }
         end
     end
     return ingredients
 end
 
-function bridge:_itemIdFromLink(link)
-    if type(link) ~= "string" then
-        return nil
-    end
-    return tonumber(link:match("|H%d+:item:(%d+):"))
-end
-
 function bridge:_collectRecipeIngredientsByResultLink(resultItemLink)
-    local itemId = self:_itemIdFromLink(resultItemLink)
-    if itemId then
+    if not HasItemLink(resultItemLink) then return {} end
+    local itemId = GetItemLinkItemId(resultItemLink)
+    if itemId > 0 then
         local _, recipeListIndex, recipeIndex = GetRecipeInfoFromItemId(itemId)
         if recipeListIndex and recipeIndex then
             return self:_collectRecipeIngredients(recipeListIndex, recipeIndex)
@@ -792,7 +818,7 @@ function bridge:_collectSmithingPatternIngredients(craftContext)
         return ingredients
     end
     local function AddMaterial(link, count)
-        if IsValidItemLink(link) then
+        if HasItemLink(link) then
             ingredients[#ingredients + 1] = {itemLink = link, quantity = count, name = GetItemLinkName(link)}
         end
     end
@@ -844,15 +870,16 @@ function bridge:_buildCraftMaterialCostLines(resultItemLink, craftContext)
 
         local name = entry.name
         if not name or name == "" then
-            name = IsValidItemLink(link) and GetItemLinkName(link) or "Unknown mat."
+            name = HasItemLink(link) and GetItemLinkName(link) or "Unknown mat."
         end
 
         if type(name) ~= "string" or name == "" then
             -- Skip unknown placeholder-like ingredients to avoid noisy fake entries.
         else
+            name = zo_strformat(SI_TOOLTIP_ITEM_NAME, name)
             namedIngredientCount = namedIngredientCount + 1
             local costText = "n/a"
-            if IsValidItemLink(link) then
+            if HasItemLink(link) then
                 local priceInfo = self:_getTtcPriceInfo(link)
                 local unitPrice = priceInfo and (priceInfo.SuggestedPrice or priceInfo.Avg)
                 if type(unitPrice) == "number" and unitPrice > 0 then
@@ -1647,7 +1674,7 @@ function bridge:_hookTooltipPrice()
         elseif not tooltip._lgcmbBagHooksInstalled then
             -- Native tooltip controls are userdata; SecurePostHook only accepts tables.
             ZO_PostHook(tooltip, "LayoutBagItem", function(control, bagId, slotIndex)
-                if bridge.enabled then
+                if bridge:_canUseOverlay() then
                     bridge:_appendGamepadTooltipInfo(control, bagId, slotIndex, "bag")
                 end
             end)
@@ -1669,10 +1696,10 @@ function bridge:_hookCraftingTooltips()
     end
     -- Hook the actual gamepad classes, not guessed globals or keyboard overrides.
     local function ShowResult(control, tooltip, itemLink, context)
-        if not bridge.enabled then
+        if not bridge:_canUseOverlay() then
             return
         end
-        if control:IsControlHidden() or not IsValidItemLink(itemLink) then
+        if control:IsControlHidden() or not HasItemLink(itemLink) then
             bridge._templateCraftingOverlayActive = false
             bridge:_hideOverlay()
             return
@@ -1681,12 +1708,14 @@ function bridge:_hookCraftingTooltips()
         bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, nil, nil, "furncraft", context)
     end
     SecurePostHook(ZO_GamepadSmithingCreation, "SetupResultTooltip", function(creation, pattern, material, quantity, styleId, trait)
+        if not bridge:_canUseOverlay() then return end
         local context = bridge:_makeCraftContext(pattern, material, quantity, styleId, trait)
         context.forceSmithingPatternMaterials = true
         local link = GetSmithingPatternResultLink(pattern, material, quantity, styleId, trait, LINK_STYLE_DEFAULT)
         ShowResult(creation.resultTooltip, creation.resultTooltip.tip, link, context)
     end)
     SecurePostHook(ZO_GamepadProvisioner, "RefreshRecipeDetails", function(provisioner, selectedData)
+        if not bridge:_canUseOverlay() then return end
         if not selectedData then
             bridge._templateCraftingOverlayActive = false
             bridge:_hideOverlay()
@@ -1698,10 +1727,12 @@ function bridge:_hookCraftingTooltips()
         ShowResult(provisioner.resultTooltip, provisioner.resultTooltip.tip, link, context)
     end)
     SecurePostHook(ZO_GamepadAlchemy, "UpdateTooltip", function(alchemy)
+        if not bridge:_canUseOverlay() then return end
         local link = alchemy:IsCraftable() and alchemy:GetResultItemLink() or nil
         ShowResult(alchemy.tooltip, alchemy.tooltip.tip, link)
     end)
     SecurePostHook(ZO_GamepadEnchanting, "UpdateTooltip", function(enchanting)
+        if not bridge:_canUseOverlay() then return end
         local link = enchanting:IsCraftable() and enchanting:GetResultItemLink() or nil
         ShowResult(enchanting.resultTooltip, enchanting.resultTooltip.tip, link)
     end)
@@ -1721,10 +1752,10 @@ function bridge:_hookTradingHouseTooltip()
         return false
     end
     ZO_PostHook(tooltip, "LayoutGuildStoreSearchResult", function(control, itemLink, stackCount, sellerName)
-        if not bridge.enabled then
+        if not bridge:_canUseOverlay() then
             return
         end
-        if not IsValidItemLink(itemLink) then
+        if not HasItemLink(itemLink) then
             bridge:_hideOverlay()
             return
         end
@@ -1737,7 +1768,7 @@ function bridge:_hookTradingHouseTooltip()
 end
 
 function bridge:_scheduleTooltipPriceHookRetry()
-    if self._tooltipHookRetryScheduled or (self._tooltipPriceHooked and self._craftingTooltipsHooked and self._tradingHouseTooltipHooked) then
+    if not self:_canUseOverlay() or self._tooltipHookRetryScheduled or (self._tooltipPriceHooked and self._craftingTooltipsHooked and self._tradingHouseTooltipHooked) then
         return
     end
     local attempts = self._tooltipHookRetryAttempts or 0
@@ -1746,13 +1777,17 @@ function bridge:_scheduleTooltipPriceHookRetry()
     end
     self._tooltipHookRetryAttempts = attempts + 1
     self._tooltipHookRetryScheduled = true
-    zo_callLater(function()
+    local generation = self._tooltipHookRetryGeneration or 0
+    EVENT_MANAGER:RegisterForUpdate(TOOLTIP_RETRY_NS, 2500, function()
+        if generation ~= (bridge._tooltipHookRetryGeneration or 0) then return end
+        EVENT_MANAGER:UnregisterForUpdate(TOOLTIP_RETRY_NS)
         bridge._tooltipHookRetryScheduled = false
+        if not bridge:_canUseOverlay() then return end
         bridge:_hookTooltipPrice()
         bridge:_hookCraftingTooltips()
         bridge:_hookTradingHouseTooltip()
         bridge:_scheduleTooltipPriceHookRetry()
-    end, 2500)
+    end)
 end
 
 function bridge:_initializeSlashCommands()
@@ -2296,89 +2331,107 @@ function bridge:Initialize()
     self:_initializeSlashCommands()
     self:_initializeSettingsPanel()
 
-    self:_hookDiscoverSlotActions()
-    self:_hookRefreshKeybindStrip()
-    
-    -- Попытка подцепить тултипы
-    local tooltipHookSuccess = self:_hookTooltipPrice()
-    if not tooltipHookSuccess then
-        LogDebug("Initial tooltip hook failed, scheduling retry...")
-        self:_scheduleTooltipPriceHookRetry()
-    end
-
-    -- Тултипы крафтовых станций (gamepad-режим)
-    self:_hookCraftingTooltips()
-
-    -- Тултип торгового дома (gamepad-режим)
-    self:_hookTradingHouseTooltip()
-
+    -- Keep addon load limited to settings and readiness listeners. Gamepad hooks
+    -- are installed on first activation of the input mode, not at addon load.
     self:_registerPlayerActivatedHook()
-
     self._initialized = true
-    LogDebug(string.format(
-        "Initialize summary: tooltipHooks=%s crafting=%s tradingHouse=%s overlay=%s enabled=%s",
-        tostring(self._tooltipPriceHooked),
-        tostring(self._craftingTooltipsHooked == true),
-        tostring(self._tradingHouseTooltipHooked),
-        tostring(self._overlayWindow ~= nil),
-        tostring(self.enabled)
-    ))
     LogDebug("Initialized")
 end
 
-local EVENT_NAMESPACE = MAJOR .. "_OnLoaded"
-local PLAYER_ACTIVATED_EVENT_NAMESPACE = MAJOR .. "_PlayerActivated"
+function bridge:_canUseOverlay()
+    return self.enabled and IsInGamepadPreferredMode() and
+        (self:_shouldShowTtcTooltipPrice() or self:_shouldShowJunkStatusInTooltip() or self:_shouldShowVendorPriceInTooltip())
+end
 
-function bridge:_registerPlayerActivatedHook()
-    if self._playerActivatedHookRegistered then
-        return
+function bridge:_stopOverlayRuntime()
+    EVENT_MANAGER:UnregisterForEvent(TH_OPEN_NS, EVENT_OPEN_TRADING_HOUSE)
+    EVENT_MANAGER:UnregisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE)
+    EVENT_MANAGER:UnregisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT)
+    EVENT_MANAGER:UnregisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT)
+    EVENT_MANAGER:UnregisterForUpdate(TOOLTIP_RETRY_NS)
+    self._contextEventsRegistered = false
+    self._tooltipHookRetryGeneration = (self._tooltipHookRetryGeneration or 0) + 1
+    self._tooltipHookRetryScheduled = false
+    self._tooltipHookRetryAttempts = 0
+    self._craftingStationActive = false
+    self._templateCraftingOverlayActive = false
+    self:_hideOverlay()
+end
+
+function bridge:_registerContextEvents()
+    if self._contextEventsRegistered then return end
+    local function OnTradingHouseOpen()
+        if not bridge:_canUseOverlay() then return end
+        bridge:_hookTradingHouseTooltip()
+        EVENT_MANAGER:RegisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE, function()
+            EVENT_MANAGER:UnregisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE)
+            bridge:_hideOverlay()
+        end)
     end
-
-    EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
-        local hooked = bridge:_hookTooltipPrice()
-        if not hooked then
-            bridge:_scheduleTooltipPriceHookRetry()
-        end
-        bridge:_hookCraftingTooltips()
-        bridge:_hookTradingHouseTooltip()
-        EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
-    end)
-
-    -- LayoutGuildStoreSearchResult is added to tooltip instances dynamically the first
-    -- time the trading house is opened.  Hook on EVENT_OPEN_TRADING_HOUSE so we catch
-    -- that moment reliably, even if the player never triggered EVENT_PLAYER_ACTIVATED
-    -- while in front of a TH.
-    local TH_OPEN_NS = MAJOR .. "_THOpen"
-    EVENT_MANAGER:RegisterForEvent(TH_OPEN_NS, EVENT_OPEN_TRADING_HOUSE, function()
-        bridge:_hookTradingHouseTooltip()
-        LogTrace("EVENT_OPEN_TRADING_HOUSE: retried TH tooltip hook")
-    end)
-
-    local TH_CLOSE_NS = MAJOR .. "_THClose"
-    EVENT_MANAGER:RegisterForEvent(TH_CLOSE_NS, EVENT_CLOSE_TRADING_HOUSE, function()
-        bridge:_hideOverlay()
-        LogTrace("Overlay hidden on EVENT_CLOSE_TRADING_HOUSE")
-    end)
-
-    local CRAFT_OPEN_NS = MAJOR .. "_CraftOpen"
-    EVENT_MANAGER:RegisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT, function(_, craftSkill, sameStation, craftMode)
+    local function OnCraftingOpen()
+        if not bridge:_canUseOverlay() then return end
         bridge._craftingStationActive = true
         bridge._templateCraftingOverlayActive = false
-        bridge:_hookTooltipPrice()
         bridge:_hookCraftingTooltips()
-        LogTrace(string.format("EVENT_CRAFTING_STATION_INTERACT: skill=%s same=%s mode=%s",
-            tostring(craftSkill), tostring(sameStation), tostring(craftMode)))
-    end)
+        EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
+            EVENT_MANAGER:UnregisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT)
+            bridge._craftingStationActive = false
+            bridge._templateCraftingOverlayActive = false
+            bridge:_hideOverlay()
+        end)
+    end
+    EVENT_MANAGER:RegisterForEvent(TH_OPEN_NS, EVENT_OPEN_TRADING_HOUSE, OnTradingHouseOpen)
+    EVENT_MANAGER:RegisterForEvent(CRAFT_OPEN_NS, EVENT_CRAFTING_STATION_INTERACT, OnCraftingOpen)
+    self._contextEventsRegistered = true
+    -- Settings/input mode can change while an interaction is already open.
+    if GetInteractionType() == INTERACTION_TRADINGHOUSE then OnTradingHouseOpen() end
+    if GetCraftingInteractionType() ~= CRAFTING_TYPE_INVALID then OnCraftingOpen() end
+end
 
-    local CRAFT_CLOSE_NS = MAJOR .. "_CraftClose"
-    EVENT_MANAGER:RegisterForEvent(CRAFT_CLOSE_NS, EVENT_END_CRAFTING_STATION_INTERACT, function()
-        bridge._craftingStationActive = false
-        bridge._templateCraftingOverlayActive = false
-        bridge:_hideOverlay()
-        LogTrace("Overlay hidden on EVENT_END_CRAFTING_STATION_INTERACT")
-    end)
+function bridge:_syncRuntime()
+    if not self.enabled then
+        EVENT_MANAGER:UnregisterForEvent(MODE_EVENT_NAMESPACE, EVENT_GAMEPAD_PREFERRED_MODE_CHANGED)
+        EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
+        self._modeEventRegistered = false
+        self._playerActivatedHookRegistered = false
+        self:_stopOverlayRuntime()
+        return
+    end
+    self:_registerPlayerActivatedHook()
+    if not IsInGamepadPreferredMode() then
+        self:_stopOverlayRuntime()
+        return
+    end
+    self:_hookDiscoverSlotActions()
+    self:_hookRefreshKeybindStrip()
+    if self:_canUseOverlay() then
+        self:_hookTooltipPrice()
+        self:_hookCraftingTooltips()
+        self:_hookTradingHouseTooltip()
+        self:_registerContextEvents()
+        self:_scheduleTooltipPriceHookRetry()
+    else
+        self:_stopOverlayRuntime()
+    end
+end
 
-    self._playerActivatedHookRegistered = true
+function bridge:_registerPlayerActivatedHook()
+    if not self.enabled then return end
+    if not self._modeEventRegistered then
+        EVENT_MANAGER:RegisterForEvent(MODE_EVENT_NAMESPACE, EVENT_GAMEPAD_PREFERRED_MODE_CHANGED, function()
+            bridge:_syncRuntime()
+        end)
+        self._modeEventRegistered = true
+    end
+    if not self._playerActivatedSeen and not self._playerActivatedHookRegistered then
+        EVENT_MANAGER:RegisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED, function()
+            EVENT_MANAGER:UnregisterForEvent(PLAYER_ACTIVATED_EVENT_NAMESPACE, EVENT_PLAYER_ACTIVATED)
+            bridge._playerActivatedSeen = true
+            bridge._playerActivatedHookRegistered = false
+            bridge:_syncRuntime()
+        end)
+        self._playerActivatedHookRegistered = true
+    end
 end
 
 local function OnAddonLoaded(_, addonName)

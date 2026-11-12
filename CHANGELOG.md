@@ -1,8 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.5.5
 - Remove all `pcall` calls and the action-error suppression wrapper. Action and menu-builder errors now propagate instead of depending on debug logging.
 - Retain one `xpcall` solely to restore temporary menu globals and callback depth before rethrowing the original traceback. Failed builders are never retried.
+- Correct optional dependency declarations to names only; retain `LibCustomMenu>=730` as the required supported version floor. Recheck Live API 101051 separately from PTS API 101052.
+- Store account-wide settings per server, migrating shared legacy settings only for new server profiles without deleting the old profile or overwriting existing server settings.
+- Defer UI hooks until gamepad readiness/activation. Register close events only during their Trading House/crafting interaction; remove overlay events and cancel the bounded retry updater when disabled or in keyboard mode.
+- Restore interaction close listeners when enabling the bridge inside an already-open Trading House or crafting station.
+- Replace the bag-type branch chain with a local lookup table and cache repeated SavedVariables references in debug logging; remove the redundant required-LibCustomMenu table guard.
+- Use native `GetLinkType`, `GetItemLinkItemId` and `zo_strformat(SI_TOOLTIP_ITEM_NAME, ...)` instead of handwritten item-link parsing/name cleanup.
+- Extend regression checks for migration, lifecycle and native helper contracts, including an optional run against the actual pinned ESO SavedVariables implementation.
 
 ## 1.5.4
 - Fix startup failure `SecurePostHook: table expected, got userdata` introduced in 1.5.3.
