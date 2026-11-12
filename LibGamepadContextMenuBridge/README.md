@@ -27,11 +27,11 @@ Place the `LibGamepadContextMenuBridge` folder in your ESO `live/AddOns` directo
 
 With LibAddonMenu, open **Settings > Addon Settings > LibGamepadContextMenuBridge**. Without it, use `/lgcmb on` or `/lgcmb off`. `/lgcmb status` shows the current state.
 
-## Compatibility and test status
+## Compatibility
 
 Submenu entries appear as flat actions, not nested menus. Headers, dividers and disabled actions are omitted. Some mouse-only actions are not supported: clicks on submenu titles, top-level checkboxes and dynamically built submenu entries. The bridge does not convert arbitrary keyboard interfaces.
 
-**1.5.5 is a beta build. It has been tested locally, but still needs testing in ESO.** Compatibility with every LibCustomMenu addon is not guaranteed.
+Compatibility with every LibCustomMenu addon is not guaranteed.
 
 ## Credits
 

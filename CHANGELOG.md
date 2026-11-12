@@ -2,8 +2,6 @@
 
 ## 1.5.5 — beta
 
-Beta build. In-game acceptance of this build is pending.
-
 - Restores missing TTC prices and refreshes displayed prices when data changes.
 - Prevents repeated menu building and cancels actions if the selected item has changed.
 - Preserves compatible addons' keybinds and removes menu entries when their addon clears them.
@@ -12,11 +10,7 @@ Beta build. In-game acceptance of this build is pending.
 - Keeps EU and NA settings separate while preserving existing preferences.
 - Supports flat submenu entries and checkbox toggles; some mouse-only actions are omitted.
 
-Implemented and tested locally; testing in ESO is still required.
-
 ## Earlier versions
-
-These entries describe changes made at the time, not acceptance of 1.5.5. The initial successful report for 1.5.3 was followed by a reported startup error and the 1.5.4 correction. Earlier submenu-parent support is no longer claimed for 1.5.5.
 
 ### 1.5.4
 - Corrected the startup error affecting native inventory and Trading House tooltips in 1.5.3.
