@@ -37,16 +37,16 @@ end
 -- 1. Both failing and successful action callbacks execute once, with no arguments.
 do
     local b = fresh()
-    b.debug = true
+    b.debug = false
     local calls, argc = 0, nil
     local capture = { entries = {}, contextControl = {} }
     b:_captureMenuEntry(capture, "failure", function(...)
         calls, argc = calls + 1, select("#", ...)
         error("intentional action failure")
     end)
-    capture.entries[1].callback()
+    local ok, err = pcall(capture.entries[1].callback)
     check(calls == 1 and argc == 0, "failed action replayed or got unexpected arguments")
-    check(contains(b._debugLog, "intentional action failure"), "callback error not logged")
+    check(not ok and tostring(err):find("intentional action failure", 1, true), "action error hidden with debug disabled")
     b:_captureMenuEntry(capture, "success", function(...) argc = select("#", ...); calls = calls + 1 end)
     capture.entries[2].callback()
     check(calls == 2 and argc == 0, "successful action contract changed")
@@ -131,9 +131,14 @@ do
             self.fireCallbackDepth = self:GetFireCallbackDepth() - 1
         end
         LibCustomMenu = { CATEGORY_EARLY = 1, CATEGORY_LATE = 1, contextMenuRegistry = registry, AddMenuItem = marker }
-        local entries = b:_runContextCallbacks(LibCustomMenu, slot, actions)
+        local ok, result = pcall(function() return b:_runContextCallbacks(LibCustomMenu, slot, actions) end)
         check(runs == 1, "builder replayed")
-        check(#entries == ((outcome == "entry" or outcome == "partial-error") and 1 or 0), "captured entries incorrect")
+        if outcome == "error" or outcome == "partial-error" then
+            check(not ok and tostring(result):find("intentional builder failure", 1, true), "builder error hidden")
+            check(tostring(result):find("stack traceback:", 1, true) and tostring(result):find("regression.lua", 1, true), "original builder traceback lost")
+        else
+            check(ok and #result == (outcome == "entry" and 1 or 0), "captured entries incorrect")
+        end
         check(registry:GetFireCallbackDepth() == 0, "failed builder leaked callback depth")
         check(not b._isCapturing and actions.m_contextMenuMode == false, "capture state not restored")
         check(ZO_InventorySlot_GetType == slotType, "slot type global not restored")

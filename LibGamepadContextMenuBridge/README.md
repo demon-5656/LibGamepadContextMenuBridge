@@ -31,7 +31,7 @@ It is designed for addons that already register inventory context actions throug
 - Children appear directly in the gamepad action list as `Parent: Child`.
 - Selecting a child runs only its callback, not the parent's callback.
 - Checkbox children receive their new boolean state, while ordinary actions receive no arguments.
-- An action that throws is logged in debug mode and is not automatically repeated.
+- An action that throws propagates its error and is not automatically repeated. Menu-building failures restore temporary capture state before propagating the original traceback.
 
 ## Usage
 1. Install folder `LibGamepadContextMenuBridge` into `AddOns`.

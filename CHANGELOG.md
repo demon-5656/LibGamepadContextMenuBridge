@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- Remove all `pcall` calls and the action-error suppression wrapper. Action and menu-builder errors now propagate instead of depending on debug logging.
+- Retain one `xpcall` solely to restore temporary menu globals and callback depth before rethrowing the original traceback. Failed builders are never retried.
+
 ## 1.5.4
 - Fix startup failure `SecurePostHook: table expected, got userdata` introduced in 1.5.3.
 - Use `ZO_PostHook` for native inventory and Trading House tooltip controls; retain `SecurePostHook` on Lua class tables.

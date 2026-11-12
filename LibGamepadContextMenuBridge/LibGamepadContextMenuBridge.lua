@@ -121,14 +121,6 @@ local function LogTrace(message)
     bridge:_debugMessage(message, true)
 end
 
-local function RunExternalAction(callback)
-    -- External action callbacks may fail after side effects; never retry them.
-    local ok, err = pcall(callback)
-    if not ok then
-        LogDebug("Menu callback failed: " .. tostring(err))
-    end
-end
-
 local function EvaluateValue(value, ...)
     if type(value) == "function" then
         return value(...)
@@ -1995,7 +1987,7 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
         kind = "action",
         label = label,
         callback = function()
-            RunExternalAction(callback)
+            callback()
         end,
     }
     LogTrace(string.format("Captured action: %s", tostring(label)))
@@ -2045,11 +2037,9 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
                                     label = childLabel,
                                     callback = function()
                                         if itemTypeValue == MENU_ADD_OPTION_CHECKBOX then
-                                            RunExternalAction(function()
-                                                callback(not checked)
-                                            end)
+                                            callback(not checked)
                                         else
-                                            RunExternalAction(callback)
+                                            callback()
                                         end
                                     end,
                                 }
@@ -2071,7 +2061,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
         label = submenuLabel,
         entries = submenuActionEntries,
         callback = type(submenuCallback) == "function" and function()
-            RunExternalAction(submenuCallback)
+            submenuCallback()
         end or nil,
     }
     LogTrace(string.format("Captured submenu: %s (%d items)", submenuLabel, #submenuActionEntries))
@@ -2153,33 +2143,32 @@ function bridge:_runContextCallbacks(lcm, inventorySlot, slotActions)
     capture.contextControl = inventorySlot
     local originalGetSlotType = ZO_InventorySlot_GetType
     local originalContextMenuMode = slotActions.m_contextMenuMode
-    -- Capture temporarily replaces menu globals. Always restore them even if
-    -- an external builder, label, or visibility callback raises an error.
-    local ok, err = pcall(function()
+    local registry = self:_readContextMenuRegistry()
+    local originalDepth = registry:GetFireCallbackDepth()
+    local activeCategory
+    -- Cleanup only: restore the temporary globals, then propagate the original
+    -- traceback to ESO's error UI instead of swallowing callback failures.
+    local ok, err = xpcall(function()
         ZO_InventorySlot_GetType = function(slot)
             local slotType = originalGetSlotType(slot)
             return slot == inventorySlot and bridge:_resolveNormalizedSlotType(slot, slotType) or slotType
         end
         slotActions.m_contextMenuMode = true
-        local registry = self:_readContextMenuRegistry()
         for category = lcm.CATEGORY_EARLY, lcm.CATEGORY_LATE do
-            -- Do not retry an empty or failed callback; side effects may have
-            -- happened already. Recover ESO's depth counter after an error.
-            local depth = registry:GetFireCallbackDepth()
-            local callbackOk, callbackErr = pcall(registry.FireCallbacks, registry, category, inventorySlot, slotActions)
-            if not callbackOk then
-                registry.fireCallbackDepth = depth
-                registry:Clean(category)
-                LogDebug("Context callback failed: " .. tostring(callbackErr))
-            end
+            activeCategory = category
+            registry:FireCallbacks(category, inventorySlot, slotActions)
         end
-    end)
+    end, debug.traceback)
     slotActions.m_contextMenuMode = originalContextMenuMode
     ZO_InventorySlot_GetType = originalGetSlotType
     self:_endCapture(lcm, capture)
     self._isCapturing = false
     if not ok then
-        LogDebug(err)
+        registry.fireCallbackDepth = originalDepth
+        if activeCategory then
+            registry:Clean(activeCategory)
+        end
+        error(err, 0)
     end
     return capture.entries
 end
