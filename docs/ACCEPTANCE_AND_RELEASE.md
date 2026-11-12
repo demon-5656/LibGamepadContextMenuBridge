@@ -1,6 +1,6 @@
 # Приёмка, пилот и подача продукта
 
-**Текущий статус: 1.5.5 development, игровая приёмка NOT RUN.** Локальные результаты предыдущих состояний не являются приёмкой текущего refactor. Первоначальный успешный отчёт о 1.5.3 позднее дополнился фактической startup-ошибкой; она исправлялась отдельно в 1.5.4. Матрица 1.5.5 не заполнена.
+**Current status: 1.5.5 beta; in-game acceptance NOT RUN.** GitHub prerelease `v1.5.5` is published; the update to ESOUI page `4432` is pending moderator approval as of November 12, 2026. The owner explicitly authorized packaging and publication as beta, not a claim of game acceptance. See [publication notes](PUBLICATION_NOTES.md) for the artifact checksum and verification. The 1.5.5 game acceptance matrix remains incomplete. The initial successful report for 1.5.3 was followed by a startup error, corrected separately in 1.5.4.
 
 ## Обязательные gates для текущего исправления
 
@@ -12,9 +12,9 @@
 - [ ] TTC nil→ready, смена данных/региона и TTL проверены, включая открытый overlay; скрытого polling нет. Цены unit/stack/comparison согласованы.
 - [ ] Recipe output 1 и >1, неизвестный выход и неполные цены проверены; стоимость craft и результата имеют один базис, сравнение не названо прибылью.
 - [ ] В ESO выполнены применимые строки матрицы ниже с точными версиями и наблюдаемым результатом, включая TTC correction. Никакой локальный PASS не заменяет это условие.
-- [ ] Отдельно подтверждены состав будущего пакета и LICENSE, AI disclosure в начале описания, зависимости и credits. Для сборки/публикации получено явное разрешение владельца.
+- [x] Package contents and LICENSE, opening AI disclosure, dependencies and credits checked. The owner authorized packaging and beta publication; the GitHub asset and persisted ESOUI submission were read back.
 
-Until the gates are complete, [ESOUI_DESCRIPTION.bbcode](ESOUI_DESCRIPTION.bbcode) remains an English-only draft; this document does not authorize a release, tag or upload.
+Open game-acceptance gates remain requirements for stable recommendations. The owner authorized beta publication separately; the submitted English description is [ESOUI_DESCRIPTION.bbcode](ESOUI_DESCRIPTION.bbcode). Publication does not mark those game gates as passed.
 
 База: 1.5.2, commit `9c5fee6e7ee2677c062b580e78b54546bee7247a`. Подготовлено 11 ноября 2026 года.
 
@@ -94,7 +94,7 @@ Until the gates are complete, [ESOUI_DESCRIPTION.bbcode](ESOUI_DESCRIPTION.bbcod
 - Только базовая регрессия без native checkout: `lua5.1 scripts/tests/regression.lua`; она не заменяет полный runner.
 - Синтаксис изменённых Lua-файлов и `git diff --check`.
 - При изменении упаковки — `python3 -B scripts/tests/test_packaging.py` в disposable synthetic repos: **14 тестов PASS**, независимо повторены. Это проверки упаковки, не игровые и не Lua regression tests.
-- Сборка — отдельный разрешаемый шаг: `bash scripts/build_release.sh` (wrapper) или `python3 scripts/build_release.py`. Нужен **Python 3 со стандартной библиотекой**, отдельный executable `zip` не нужен. В текущей задаче реальный `dist`/release не собирался.
+- Packaging requires separate authorization: `bash scripts/build_release.sh` (wrapper) or `python3 scripts/build_release.py`. Requires **Python 3 and its standard library**, not an external `zip` executable. The authorized 1.5.5 beta ZIP was built and verified; see [publication notes](PUBLICATION_NOTES.md).
 - Allowlist ZIP: ровно пять файлов под `LibGamepadContextMenuBridge/`: одноимённые manifest/Lua, `README.md`, `CREDITS.md`, а также корневой `LICENSE`, помещённый в папку аддона. Проверяются версии Lua/manifest, runtime filenames manifest, CRC и побайтовое соответствие. Существующий ZIP не перезаписывается, включая concurrent build; не удалять его автоматически для обхода отказа.
 
 Не выдавать отсутствие интерпретатора или пропущенный тест за `PASS`. Не запускать чужие материалы из `tests/` как доказательство качества ESO-аддона: полный проверочный entry point — [scripts/tests/run.lua](../scripts/tests/run.lua).
