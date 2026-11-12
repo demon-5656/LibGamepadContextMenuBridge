@@ -1,80 +1,46 @@
 # LibGamepadContextMenuBridge
 
-**AI disclosure:** AI was used for code generation, refactoring and documentation. Author: **Azmail**. See [credits](LibGamepadContextMenuBridge/CREDITS.md).
+Use inventory actions from compatible keyboard/mouse addons while playing ESO with a gamepad.
 
-Standalone ESO library addon repository.
+The bridge brings actions registered through **LibCustomMenu** into the gamepad item-action menu. Existing compatible addons do not need to be modified.
 
-This library mirrors inventory actions registered via `LibCustomMenu:RegisterContextMenu(...)` into gamepad action lists.
-It allows keyboard/mouse context actions from compatible addons to be used in gamepad mode.
+## Features
 
-It also includes optional quality-of-life additions for gamepad inventory users:
-- native `Mark as Junk` / `Unmark as Junk` fallback when the base gamepad menu does not expose the junk action
-- optional tooltip info block for TTC price, TTC detail summary, junk status, bound status, and vendor value
+- Custom inventory actions in the gamepad menu.
+- Submenu actions displayed as `Parent: Child`, including checkbox actions.
+- Mark/unmark items as junk.
+- Optional TTC prices, vendor value and item-status information.
+- Crafting material cost estimates, with incomplete prices marked accordingly.
+- Separate account-wide settings for EU and NA.
 
-## How the bridge behaves
-1. Uses the context registry provided by the required `LibCustomMenu>=730`; it does not maintain a second callback cache.
-2. On gamepad item-action refresh, rebuilds custom context entries for the current slot.
-3. Converts supported entries to gamepad `slotActions`.
-4. Executes the original callback when a mirrored action is selected.
+## Requirements
 
-## Which entries are mirrored
-- `AddCustomMenuItem(...)` actionable rows.
-- `AddCustomSubMenuItem(...)` parents with their own click callback, as independent actions.
-- Submenu children flattened into `Parent: Child` actions; selecting a child does not run the parent callback.
-- Entries in `LibCustomMenu` category order (`EARLY` to `LATE`).
+- **LibCustomMenu 7.3.0 or newer** (`AddOnVersion >= 730`).
+- Optional: **LibAddonMenu-2.0** for the settings panel.
+- Optional: **Tamriel Trade Centre** and its price data for market prices.
 
-## Which entries are skipped
-- Dividers, headers, and non-action rows.
-- Disabled entries without executable callbacks.
-- Entries not generated for the current slot.
-- Duplicate actions already present in the gamepad list.
+Targets the desktop client, ESO API **101051**. Version **1.5.5** is in development.
 
-## Repository Layout
-- `LibGamepadContextMenuBridge/` - addon files for `Documents/Elder Scrolls Online/live/AddOns/`
-- `scripts/build_release.sh` - builds `.zip` (or `.tar.gz` fallback) release archive
-- `scripts/tests/regression.lua` - deterministic callback, overlay, dispatch, submenu, and material-estimate checks
+## Installation
 
-## Development Roadmap
+Place the `LibGamepadContextMenuBridge` folder in your ESO `live/AddOns` directory and enable it alongside LibCustomMenu.
 
-Документация перехода от полезного моста к востребованному инструменту для игроков и платформе для авторов:
+Settings: **Settings → Addon Settings → LibGamepadContextMenuBridge**.
+Without LibAddonMenu, use `/lgcmb` for commands or `/lgcmb on` and `/lgcmb off` to toggle the bridge.
 
-- [От «просто мод» к «мне это точно нужно»](docs/PRODUCT_STRATEGY.md) — ценность для игрока, приоритеты, этапы и первый backlog.
-- [Проект платформы и API](docs/PLATFORM_SPEC.md) — границы core, provider/context/action contracts и миграция без поломки legacy.
-- [Приёмка, пилот и выпуск](docs/ACCEPTANCE_AND_RELEASE.md) — игровые сценарии, критерии готовности, демонстрация пользы и публикация.
+## Compatibility
 
-Это планы и требования, а не список уже реализованных возможностей. Предлагаемый provider API пока отсутствует в 1.5.2; текущий способ подключения описан в [addon README](LibGamepadContextMenuBridge/README.md).
+Supports inventory actions registered through `LibCustomMenu:RegisterContextMenu`. It does not convert arbitrary keyboard-only interfaces. Headers, dividers and disabled actions are not shown; submenu children appear directly in the gamepad action list.
 
-## Local Regression Checks
-From the repository root, run `lua scripts/tests/regression.lua`.
-These tests use explicit ESO/TTC stubs; they do not replace an in-game check.
-Crafting material totals include ingredients beyond the eight displayed detail rows.
-Missing prices produce a partial/incomplete estimate without a crafted-value comparison.
+## Documentation
 
-## Dependencies
-- Required: `LibCustomMenu>=730`
-- Optional: `LibAddonMenu-2.0` (settings panel; integration checked against r43)
-- Optional for price display: `TamrielTradeCentre`
+- [Changelog](CHANGELOG.md)
+- [Addon API and commands](LibGamepadContextMenuBridge/README.md)
+- [Developer API notes](docs/API_CONTRACTS_101051.md)
+- [Roadmap](docs/PRODUCT_STRATEGY.md) · [Proposed platform API](docs/PLATFORM_SPEC.md) · [Acceptance and release](docs/ACCEPTANCE_AND_RELEASE.md)
 
-The manifest targets **API 101051**. Contracts are checked against the pinned ESO UI sources; see [API verification](docs/API_CONTRACTS_101051.md).
+## Author and credits
 
-`>=730` checks the required dependency's integer `AddOnVersion`, not its display `Version`. Optional dependencies only affect load order; `>=` is not a minimum-version gate there. `PCDependsOn` and `ConsoleDependsOn` are platform-specific required dependencies, not alternative optional declarations. This addon targets the desktop client; console support is not claimed.
+**Azmail**. AI was used for code generation, refactoring and documentation. See [credits](LibGamepadContextMenuBridge/CREDITS.md).
 
-## Settings and lifecycle
-- Settings are account-wide **per server** (`GetWorldName()`), so EU and NA can be configured independently.
-- A server's first load inherits the old shared settings, including explicit `false` values and debug history. Existing server settings and the legacy profile are preserved.
-- UI hooks are installed on first gamepad activation after readiness, not directly at addon load. Installed hooks are reused and skip work while disabled or in keyboard mode.
-- Trading House/crafting close listeners exist only during their interaction. Disabling the overlay or bridge, or returning to keyboard mode, removes overlay events and cancels the bounded readiness updater.
-
-## Install (manual)
-Copy the folder below into your ESO AddOns directory:
-- `LibGamepadContextMenuBridge/`
-
-Target path:
-`~/Documents/Elder Scrolls Online/live/AddOns/LibGamepadContextMenuBridge/`
-
-## Build Release Archive
-```bash
-bash scripts/build_release.sh
-```
-
-Output files are written to `dist/`.
+This add-on is not created by, affiliated with, or sponsored by ZeniMax Media Inc. or its affiliates.

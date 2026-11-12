@@ -1,20 +1,12 @@
 # Changelog
 
 ## 1.5.5
-- Fix same-item overlay reappearance after hiding: debounce now follows the active tooltip owner/generation and includes display source and crafting options.
-- Reuse one private action StringId through native `SafeAddString`; already-created actions retain their text and callbacks instead of growing a label-indexed global ID cache.
-- Format debug/trace messages only after their logging gates pass, preserving literal percent signs and numeric/nil trace arguments.
-- Use native `zo_strtrim`, cached `GetItemQualityColor(...):ToHex()` and `ZO_CombineNumericallyIndexedTables` instead of custom trim/RGB conversion and repeated array-copy loops.
-- Remove unused internal helpers, a currency alias and write-only crafting flags; share the menu-capture adapter and compact overlay colour formatting without changing output order.
-- Remove all `pcall` calls and the action-error suppression wrapper. Action and menu-builder errors now propagate instead of depending on debug logging.
-- Retain one `xpcall` solely to restore temporary menu globals and callback depth before rethrowing the original traceback. Failed builders are never retried.
-- Correct optional dependency declarations to names only; retain `LibCustomMenu>=730` as the required supported version floor. Recheck Live API 101051 separately from PTS API 101052.
-- Store account-wide settings per server, migrating shared legacy settings only for new server profiles without deleting the old profile or overwriting existing server settings.
-- Defer UI hooks until gamepad readiness/activation. Register close events only during their Trading House/crafting interaction; remove overlay events and cancel the bounded retry updater when disabled or in keyboard mode.
-- Restore interaction close listeners when enabling the bridge inside an already-open Trading House or crafting station.
-- Replace the bag-type branch chain with a local lookup table and cache repeated SavedVariables references in debug logging; remove the redundant required-LibCustomMenu table guard.
-- Use native `GetLinkType`, `GetItemLinkItemId` and `zo_strformat(SI_TOOLTIP_ITEM_NAME, ...)` instead of handwritten item-link parsing/name cleanup.
-- Extend regression checks for migration, lifecycle and native helper contracts, including an optional run against the actual pinned ESO SavedVariables implementation.
+- Fix item information not reappearing when quickly reopening the same tooltip.
+- Improve overlay updates when switching input modes, crafting options or item menus.
+- Keep EU and NA settings separate while preserving existing preferences.
+- Prevent changing action labels from continually allocating new string IDs.
+- Reduce unnecessary work in debug logging and simplify internal code.
+- Update dependency declarations and target ESO API 101051.
 
 ## 1.5.4
 - Fix startup failure `SecurePostHook: table expected, got userdata` introduced in 1.5.3.
