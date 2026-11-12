@@ -76,6 +76,11 @@ local function fresh()
         nextId = nextId + 1
         _G[name], strings[nextId] = nextId, value
     end
+    -- Private custom IDs have no version entry; SafeAddString updates their value.
+    SafeAddString = function(id, value, version)
+        assert(strings[id] and version == 0, "invalid private string update")
+        strings[id] = value
+    end
     GetString = function(id) assert(strings[id], "unknown string ID"); return strings[id] end
     ZO_Inventory_GetBagAndIndex = function(slot) return slot.bagId, slot.slotIndex end
     TamrielTradeCentrePrice, LibAddonMenu2 = nil, nil
@@ -720,4 +725,153 @@ do
     end
     print("PASS native utility refactor")
 end
-print("PASS all 15 regression groups (" .. checks .. " assertions)")
+-- 16. Debounce is scoped to an active owner/generation, including pending retries.
+do
+    local b = fresh()
+    local now, rendered, ready, empty = 1000, 0, true, false
+    local queue, hidden = {}, true
+    local overlay = { label = {}, window = {
+        SetHidden = function(_, value) hidden = value end,
+        SetHandler = function() end,
+    } }
+    GetGameTimeMilliseconds = function() return now end
+    zo_callLater = function(fn) queue[#queue + 1] = fn end
+    b._overlayWindow = overlay
+    b._ensureOverlayWindow = function() return overlay end
+    b._buildTooltipInfoLinesByLink = function() return empty and {} or { "|cFFFFFFVALUE|r" } end
+    b._buildCompactOverlayLines = function(_, lines) return lines end
+    b._renderOverlayLines = function() rendered = rendered + 1 end
+    b._resizeOverlayToText = function() end
+    b._positionOverlay = function() return ready end
+    local a, other = {}, {}
+    local link = "|H1:item:123|hitem|h"
+    local function show(tooltip, source, context)
+        b:_appendGamepadTooltipInfoByLink(tooltip, link, 1, nil, source or "guildstore", context)
+    end
+    show(a)
+    show(a)
+    check(rendered == 1 and not hidden, "active duplicate was not coalesced")
+    b:_hideOverlay()
+    show(a)
+    check(rendered == 2 and not hidden and b._overlayTooltipControl == a, "hidden same-item overlay did not reappear")
+    show(a, "furncraft")
+    check(rendered == 3 and b._overlaySource == "furncraft", "different source was suppressed")
+    show(other, "furncraft")
+    show(a, "furncraft")
+    check(rendered == 5 and b._overlayTooltipControl == a, "previous tooltip owner was suppressed")
+    now = now + 200
+    show(a, "furncraft")
+    check(rendered == 6, "expired duplicate was suppressed")
+    local context = { patternIndex=1, materialIndex=2, materialQuantity=3, styleIndex=4, traitIndex=5 }
+    show(a, "furncraft", context)
+    local before = rendered
+    show(a, "furncraft", context)
+    check(rendered == before, "unchanged craft context was not coalesced")
+    for _, field in ipairs({"styleIndex", "traitIndex", "materialQuantity"}) do
+        context[field] = context[field] + 1
+        show(a, "furncraft", context)
+        before = before + 1
+        check(rendered == before, "changed craft " .. field .. " was suppressed")
+    end
+    context.forceSmithingPatternMaterials = true
+    show(a, "furncraft", context)
+    check(rendered == before + 1, "changed ingredient source was suppressed")
+    now = now + 200
+    empty = true
+    show(a)
+    check(hidden and b._overlayTooltipControl == nil, "empty result retained overlay")
+    empty = false
+    show(a)
+    check(not hidden and b._overlayTooltipControl == a, "empty-to-populated result was suppressed")
+    b:_hideOverlay()
+    ready = false
+    show(a)
+    show(a)
+    check(#queue == 1, "duplicate request scheduled a second readiness retry")
+    b:_hideOverlay()
+    show(a)
+    check(#queue == 2, "hide did not permit a fresh pending request")
+    before = rendered
+    ready = true
+    queue[1]()
+    check(rendered == before, "old pending retry survived hide")
+    queue[2]()
+    check(rendered == before + 1 and not hidden, "current pending retry failed")
+    print("PASS overlay debounce ownership")
+end
+
+-- 17. AddSlotAction snapshots text; one ID can serve changing menus safely.
+do
+    local b = fresh()
+    local create = ZO_CreateStringId
+    local allocated = 0
+    ZO_CreateStringId = function(name, value)
+        allocated = allocated + 1
+        create(name, value)
+    end
+    b._buildNativeJunkAction = function() end
+    local first, last
+    for round = 1, 500 do
+        local actions = { m_slotActions = {} }
+        -- Snapshot semantics from pinned inventoryslotactions.lua:167-183.
+        function actions:AddSlotAction(id, callback, actionType)
+            self.m_slotActions[#self.m_slotActions + 1] = {GetString(id), callback, actionType}
+        end
+        local entries = {}
+        for index = 1, 6 do
+            local label = "menu " .. round .. " action " .. index
+            entries[index] = { kind="action", label=label, callback=function() return label end }
+        end
+        b:_appendEntriesToSlotActions(actions, entries, {})
+        check(#actions.m_slotActions == 6, "string reuse dropped menu entries")
+        first, last = first or actions.m_slotActions, actions.m_slotActions
+    end
+    check(allocated == 1, "dynamic labels allocated more than one private StringId")
+    check(b._stringIdByLabel == nil and b._nextStringIdIndex == nil, "label-indexed cache retained")
+    for index = 1, 6 do
+        local oldLabel, newLabel = "menu 1 action " .. index, "menu 500 action " .. index
+        check(first[index][1] == oldLabel and first[index].name == oldLabel, "old action label changed")
+        check(last[index][1] == newLabel and last[index].actionName == newLabel, "current action label stale")
+        check(first[index][2]() == oldLabel and last[index][2]() == newLabel, "StringId reuse changed callbacks")
+    end
+    check(GetString(b._actionStringId) == "menu 500 action 6", "private string not updated")
+    print("PASS bounded action StringId (3000 labels, " .. allocated .. " allocated ID)")
+end
+
+-- 18. Debug/trace gates run before formatting, without treating literal % as a format.
+do
+    local b = fresh()
+    local originalFormat, formats, messages = string.format, 0, {}
+    b.savedVars = {debugStoreHistory=false, debugToChat=true}
+    d = function(message) messages[#messages + 1] = message end
+    string.format = function(...)
+        formats = formats + 1
+        return originalFormat(...)
+    end
+    b:_debugMessage("value=%d", false, 42)
+    local capture = {entries={}, contextControl={}}
+    b:_captureMenuEntry(capture, "quiet", function() end)
+    check(formats == 0 and #messages == 0, "disabled debug formatted messages")
+    b.debug = true
+    b:_captureMenuEntry(capture, "quiet trace", function() end)
+    check(formats == 0 and #messages == 0, "disabled verbose formatted trace")
+    b:_debugMessage("value=%d", false, 42)
+    check(formats == 2 and messages[1] == "[LibGamepadContextMenuBridge] value=42", "enabled debug formatting changed")
+    b:_debugMessage("100% literal", false)
+    check(formats == 3 and messages[2] == "[LibGamepadContextMenuBridge] 100% literal", "literal percent treated as a format")
+    b.debugVerbose = true
+    b:_captureMenuEntry(capture, "visible trace", function() end)
+    check(formats == 5 and messages[3] == "[LibGamepadContextMenuBridge] Captured action: visible trace", "trace logger lost format arguments")
+    b._buildTooltipInfoLinesByLink = function() return {} end
+    GetGameTimeMilliseconds = function() return 1000 end
+    local link = "|H1:item:123|hitem|h"
+    b:_appendGamepadTooltipInfoByLink({}, link, 3, 90, "guildstore")
+    b:_appendGamepadTooltipInfoByLink({}, link, nil, nil, "guildstore")
+    string.format = originalFormat
+    check(formats == 9 and messages[4] == "[LibGamepadContextMenuBridge] _appendByLink: " .. link .. " sc=3 price=90", "numeric trace arguments changed")
+    check(messages[5] == "[LibGamepadContextMenuBridge] _appendByLink: " .. link .. " sc=nil price=nil", "nil trace arguments changed")
+    check(#capture.entries == 3, "logging changed action capture")
+    print("PASS lazy debug formatting")
+end
+
+print("PASS all 18 regression groups (" .. checks .. " assertions)")

@@ -1,6 +1,9 @@
 # Changelog
 
 ## 1.5.5
+- Fix same-item overlay reappearance after hiding: debounce now follows the active tooltip owner/generation and includes display source and crafting options.
+- Reuse one private action StringId through native `SafeAddString`; already-created actions retain their text and callbacks instead of growing a label-indexed global ID cache.
+- Format debug/trace messages only after their logging gates pass, preserving literal percent signs and numeric/nil trace arguments.
 - Use native `zo_strtrim`, cached `GetItemQualityColor(...):ToHex()` and `ZO_CombineNumericallyIndexedTables` instead of custom trim/RGB conversion and repeated array-copy loops.
 - Remove unused internal helpers, a currency alias and write-only crafting flags; share the menu-capture adapter and compact overlay colour formatting without changing output order.
 - Remove all `pcall` calls and the action-error suppression wrapper. Action and menu-builder errors now propagate instead of depending on debug logging.

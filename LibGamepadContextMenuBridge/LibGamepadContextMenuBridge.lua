@@ -23,8 +23,6 @@ bridge._tooltipPriceHooked = bridge._tooltipPriceHooked or false
 bridge._tradingHouseTooltipHooked = bridge._tradingHouseTooltipHooked or false
 bridge._playerActivatedHookRegistered = bridge._playerActivatedHookRegistered or false
 bridge._debugLog = bridge._debugLog or {}
-bridge._stringIdByLabel = bridge._stringIdByLabel or {}
-bridge._nextStringIdIndex = bridge._nextStringIdIndex or 1
 bridge._tooltipTtcCache = bridge._tooltipTtcCache or {}
 bridge._formattedTooltipLineCache = bridge._formattedTooltipLineCache or {}
 bridge._tooltipTtcCacheSize = bridge._tooltipTtcCacheSize or 0
@@ -97,7 +95,7 @@ function bridge:_addDebugHistory(message)
     end
 end
 
-function bridge:_debugMessage(message, verboseOnly)
+function bridge:_debugMessage(message, verboseOnly, ...)
     if not self.debug then
         return
     end
@@ -106,6 +104,9 @@ function bridge:_debugMessage(message, verboseOnly)
         return
     end
 
+    if select("#", ...) > 0 then
+        message = string.format(message, ...)
+    end
     local formatted = string.format("[%s] %s", MAJOR, tostring(message))
     local savedVars = self.savedVars
 
@@ -118,12 +119,12 @@ function bridge:_debugMessage(message, verboseOnly)
     end
 end
 
-local function LogDebug(message)
-    bridge:_debugMessage(message, false)
+local function LogDebug(message, ...)
+    bridge:_debugMessage(message, false, ...)
 end
 
-local function LogTrace(message)
-    bridge:_debugMessage(message, true)
+local function LogTrace(message, ...)
+    bridge:_debugMessage(message, true, ...)
 end
 
 local function EvaluateValue(value, ...)
@@ -208,15 +209,15 @@ local function StampActionLabel(slotActions, label)
 end
 
 function bridge:_ensureActionStringId(label)
-    local id = self._stringIdByLabel[label]
-    if not id then
-        local name = string.format("SI_LGCMB_ACTION_%d", self._nextStringIdIndex)
-        self._nextStringIdIndex = self._nextStringIdIndex + 1
-        ZO_CreateStringId(name, label)
-        id = _G[name]
-        self._stringIdByLabel[label] = id
+    -- AddSlotAction snapshots GetString(id) into the action's name immediately.
+    -- Reuse one private ID; dynamic labels must not allocate globals forever.
+    if not self._actionStringId then
+        ZO_CreateStringId("SI_LGCMB_ACTION", label)
+        self._actionStringId = SI_LGCMB_ACTION
+    else
+        SafeAddString(self._actionStringId, label, 0)
     end
-    return id
+    return self._actionStringId
 end
 
 function bridge:_readContextMenuRegistry()
@@ -291,7 +292,7 @@ function bridge:SetEnabled(enabled)
         self:_hideOverlay()
     end
     if self._initialized then self:_syncRuntime() end
-    LogDebug("Bridge enabled: " .. tostring(self.enabled))
+    LogDebug("Bridge enabled: %s", tostring(self.enabled))
 end
 
 function bridge:SetDebugEnabled(enabled)
@@ -299,7 +300,7 @@ function bridge:SetDebugEnabled(enabled)
     if self.savedVars then
         self.savedVars.debug = self.debug
     end
-    self:_debugMessage("Debug enabled: " .. tostring(self.debug), false)
+    self:_debugMessage("Debug enabled: %s", false, tostring(self.debug))
 end
 
 function bridge:SetDebugVerbose(enabled)
@@ -307,7 +308,7 @@ function bridge:SetDebugVerbose(enabled)
     if self.savedVars then
         self.savedVars.debugVerbose = self.debugVerbose
     end
-    self:_debugMessage("Debug verbose: " .. tostring(self.debugVerbose), false)
+    self:_debugMessage("Debug verbose: %s", false, tostring(self.debugVerbose))
 end
 
 function bridge:SetShowTtcPriceInTooltip(enabled)
@@ -1491,7 +1492,7 @@ function bridge:_showOverlayLines(lines, source, tooltipControl, retryCount, gen
     end
     overlay.window:SetHandler("OnUpdate", bridge._onRefreshOverlay)
     overlay.window:SetHidden(false)
-    LogDebug(string.format("Overlay shown: source=%s lines=%d", tostring(source), #lines))
+    LogDebug("Overlay shown: source=%s lines=%d", source or "nil", #lines)
 end
 
 function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, listingPrice, source, craftContext)
@@ -1499,11 +1500,10 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
         return
     end
 
-    LogTrace("_appendByLink: " .. tostring(itemLink):sub(1, 50)
-        .. " sc=" .. tostring(stackCount) .. " price=" .. tostring(listingPrice))
+    LogTrace("_appendByLink: %.50s sc=%s price=%s", itemLink, stackCount or "nil", listingPrice or "nil")
 
-    -- Dedup: include stackCount/listingPrice in key so same item at different TH prices
-    -- doesn't get skipped within the 200ms window.
+    -- Coalesce only requests for the current overlay generation and owner.
+    -- Hiding or replacing the overlay must allow the same item to show again.
     local contextKey = ""
     if type(craftContext) == "table" then
         contextKey = table.concat({
@@ -1512,15 +1512,19 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
             tostring(craftContext.patternIndex or ""),
             tostring(craftContext.materialIndex or ""),
             tostring(craftContext.materialQuantity or ""),
+            tostring(craftContext.styleIndex or ""),
+            tostring(craftContext.traitIndex or ""),
+            tostring(craftContext.forceSmithingPatternMaterials or false),
         }, ":")
     end
-    local dedupKey = itemLink .. "|" .. tostring(stackCount or "") .. "|" .. tostring(listingPrice or "") .. "|" .. contextKey
+    local dedupKey = itemLink .. "|" .. tostring(stackCount or "") .. "|" .. tostring(listingPrice or "") .. "|" .. tostring(source or "") .. "|" .. contextKey
     local now = GetGameTimeMilliseconds()
-    if tooltip._lgcmbLastKey == dedupKey and now - (tooltip._lgcmbLastLinkTime or 0) < 200 then
+    if self._overlayTooltipControl == tooltip
+        and tooltip._lgcmbLastGeneration == self._overlayGeneration
+        and tooltip._lgcmbLastKey == dedupKey
+        and now - (tooltip._lgcmbLastLinkTime or 0) < 200 then
         return
     end
-    tooltip._lgcmbLastKey = dedupKey
-    tooltip._lgcmbLastLinkTime = now
 
     local lines = self:_buildTooltipInfoLinesByLink(itemLink, stackCount, listingPrice, true, craftContext, source)
 
@@ -1530,6 +1534,9 @@ function bridge:_appendGamepadTooltipInfoByLink(tooltip, itemLink, stackCount, l
     end
 
     self:_showOverlayLines(lines, source, tooltip)
+    tooltip._lgcmbLastKey = dedupKey
+    tooltip._lgcmbLastLinkTime = now
+    tooltip._lgcmbLastGeneration = self._overlayGeneration
 end
 
 function bridge:_appendGamepadTooltipInfo(tooltip, bagId, slotIndex, source)
@@ -1929,7 +1936,7 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
             callback()
         end,
     }
-    LogTrace(string.format("Captured action: %s", tostring(label)))
+    LogTrace("Captured action: %s", label)
 
     return #capture.entries
 end
@@ -1947,7 +1954,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
     end
 
     if type(submenuEntries) ~= "table" then
-        LogTrace(string.format("Skipped submenu '%s': entries is %s", tostring(submenuLabel), type(submenuEntries)))
+        LogTrace("Skipped submenu '%s': entries is %s", submenuLabel, type(submenuEntries))
         return #capture.entries
     end
 
@@ -1991,7 +1998,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
     end
 
     if #submenuActionEntries == 0 and type(submenuCallback) ~= "function" then
-        LogTrace(string.format("Skipped submenu '%s': no visible actions", submenuLabel))
+        LogTrace("Skipped submenu '%s': no visible actions", submenuLabel)
         return #capture.entries
     end
 
@@ -2003,7 +2010,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
             submenuCallback()
         end or nil,
     }
-    LogTrace(string.format("Captured submenu: %s (%d items)", submenuLabel, #submenuActionEntries))
+    LogTrace("Captured submenu: %s (%d items)", submenuLabel, #submenuActionEntries)
 
     return #capture.entries
 end
@@ -2166,7 +2173,7 @@ function bridge:_appendEntriesToSlotActions(slotActions, entries, inventorySlot)
         AddUniqueAction(nativeJunkAction.label, nativeJunkAction.callback)
     end
 
-    LogTrace(string.format("Injected %d actions from %d captured entries", addedCount, #entries))
+    LogTrace("Injected %d actions from %d captured entries", addedCount, #entries)
 end
 
 function bridge:_tryInjectGamepadContextActions(inventorySlot, slotActions)
