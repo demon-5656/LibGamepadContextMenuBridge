@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.5.6 — beta
+
+- Restores missing Personal Assistant Banking and Junk rule actions in the gamepad item-action menu.
+
 ## 1.5.5 — beta
 
 - Restores missing TTC prices and refreshes displayed prices when data changes.

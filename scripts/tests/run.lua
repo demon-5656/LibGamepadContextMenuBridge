@@ -12,7 +12,7 @@ local function run(script, group)
 end
 run("scripts/tests/regression.lua")
 local groups = {
-    "identity", "menu-contracts", "capture-transaction", "native-state", "native-rebuild",
+    "identity", "menu-contracts", "pa-rule-menus", "capture-transaction", "native-state", "native-rebuild",
     "price-cache", "recipe-units", "overlay-owner", "overlay-retry", "overlay-expiry",
     "capture-setup", "live-registry", "native-clear", "native-death", "formatted-cache",
     "no-fake-mouse-controls", "unknown-result-link", "ttc-region", "registry-summary",
@@ -21,4 +21,9 @@ local groups = {
 for _, group in ipairs(groups) do run("scripts/tests/contracts.lua", group) end
 local integrations = {"lcm-keybind-lifecycle", "mixed-menu-clear", "tooltip-content-reuse", "nil-unique-id"}
 for _, group in ipairs(integrations) do run("scripts/tests/core_integrations.lua", group) end
+if os.getenv("ESO_PA_SOURCE") then
+    run("scripts/tests/pa_integration.lua")
+else
+    print("SKIP installed PA integration: set ESO_PA_SOURCE to PA's Menu/ItemContextMenu.lua")
+end
 print("PASS isolated runner: regression + " .. #groups .. " contract groups + " .. #integrations .. " core integration groups")

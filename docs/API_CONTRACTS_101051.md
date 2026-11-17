@@ -1,5 +1,7 @@
 # Контракты ESO API 101051
 
+Lua method style, explicit receivers and callback registration conventions are documented in [Maintenance conventions](MAINTENANCE.md).
+
 **1.5.5 — development; игровая приёмка NOT RUN.** Ниже описаны контракты первоисточников, реализованные исправления и локальные проверки. Локальный PASS не является проверкой в ESO.
 
 ## Источники и границы

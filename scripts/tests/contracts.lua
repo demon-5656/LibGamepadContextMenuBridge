@@ -108,6 +108,47 @@ test("menu-contracts",function()
     check(states[1]==true and states[2]==false,"boolean-only submenu checkboxes lost")
 end)
 
+test("pa-rule-menus",function()
+    local b=fresh()
+    PersonalAssistant={ItemContextMenu={}}
+    local names={"SI_PA_SUBMENU_PAB","SI_PA_SUBMENU_PAJ","SI_PA_SUBMENU_PAB_ADD_RULE",
+        "SI_PA_SUBMENU_PAB_EDIT_RULE","SI_PA_SUBMENU_PAB_DELETE_RULE",
+        "SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK","SI_PA_SUBMENU_PAJ_UNMARK_PERM_JUNK"}
+    for _,name in ipairs(names) do ZO_CreateStringId(name,name) end
+    local calls,activations=0,0
+    local function entry(id,disabled)
+        return {label=GetString(id),disabled=function(...)
+            calls=calls+1;check(select("#",...)==0,"PA rule predicate received an invented mouse row")
+            return disabled
+        end,callback=function() activations=activations+1 end}
+    end
+    for _,exists in ipairs({false,true}) do
+        local c={entries={}}
+        local add=entry(SI_PA_SUBMENU_PAB_ADD_RULE,exists)
+        b:_captureSubMenuEntries(c,GetString(SI_PA_SUBMENU_PAB),{add,
+            entry(SI_PA_SUBMENU_PAB_EDIT_RULE,not exists),entry(SI_PA_SUBMENU_PAB_DELETE_RULE,not exists)})
+        b:_captureSubMenuEntries(c,GetString(SI_PA_SUBMENU_PAJ),{
+            entry(SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK,exists),entry(SI_PA_SUBMENU_PAJ_UNMARK_PERM_JUNK,not exists)})
+        check(#c.entries==2,"PA Banking/Junk menus disappeared")
+        check(#c.entries[1].entries==(exists and 2 or 1),"wrong PA Banking enabled rules")
+        check(#c.entries[2].entries==1,"wrong PA Junk enabled rules")
+        check(c.entries[2].entries[1].label==GetString(exists and SI_PA_SUBMENU_PAJ_UNMARK_PERM_JUNK or SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK),"wrong PA Junk action")
+        check(type(add.disabled)=="function","PA source entry was mutated")
+        check(activations==0,"PA action executed while building menu")
+    end
+    check(calls==10,"PA rule predicates were replayed or skipped")
+    local c={entries={}}
+    b:_captureSubMenuEntries(c,GetString(SI_PA_SUBMENU_PAJ),{{label="Unknown PA child",
+        disabled=function() error("unknown evaluator called") end,callback=function() end}})
+    b:_captureSubMenuEntries(c,"Other parent",{entry(SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK,false)})
+    b:_captureSubMenuEntries(c,GetString(SI_PA_SUBMENU_PAJ),{{label=GetString(SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK),
+        disabled=function() error("PA evaluator failed") end,callback=function() end}})
+    check(#c.entries==0 and calls==10,"unknown or failed PA predicate exposed an action")
+    PersonalAssistant=nil
+    b:_captureSubMenuEntries(c,GetString(SI_PA_SUBMENU_PAJ),{entry(SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK,false)})
+    check(#c.entries==0 and calls==10,"PA label alone opted into evaluator execution")
+end)
+
 local native = os.getenv("ESO_NATIVE_SOURCE")
 local function loadNative()
     assert(native,"set ESO_NATIVE_SOURCE to the pinned ESO source directory")

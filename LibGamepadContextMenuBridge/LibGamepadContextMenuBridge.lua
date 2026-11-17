@@ -1,6 +1,6 @@
 local MAJOR = "LibGamepadContextMenuBridge"
-local MINOR = 155
-local ADDON_VERSION = "1.5.5"
+local MINOR = 156
+local ADDON_VERSION = "1.5.6"
 
 local existing = _G[MAJOR]
 if existing and existing.minor and existing.minor >= MINOR then
@@ -1983,19 +1983,55 @@ function bridge:_captureMenuEntry(capture, labelValue, callback, itemType, enabl
     return #capture.entries
 end
 
--- LCM evaluates these fields against real mouse-menu rows, never bag rows.
-local function NormalizeSubmenuEntry(entry)
+-- PA's Banking/Junk rule predicates close over isRuleExisting and ignore
+-- LCM's mouse-row arguments. Do not extend this exception to arbitrary rows.
+local PERSONAL_ASSISTANT_RULE_MENUS = {
+    SI_PA_SUBMENU_PAB = {"SI_PA_SUBMENU_PAB_ADD_RULE", "SI_PA_SUBMENU_PAB_EDIT_RULE", "SI_PA_SUBMENU_PAB_DELETE_RULE"},
+    SI_PA_SUBMENU_PAJ = {"SI_PA_SUBMENU_PAJ_MARK_PERM_JUNK", "SI_PA_SUBMENU_PAJ_UNMARK_PERM_JUNK"},
+}
+
+local function IsPersonalAssistantRuleEntry(parentLabel, entryLabel)
+    if type(PersonalAssistant) ~= "table" or type(PersonalAssistant.ItemContextMenu) ~= "table" then
+        return false
+    end
+    for parentName, childNames in pairs(PERSONAL_ASSISTANT_RULE_MENUS) do
+        local parentId = _G[parentName]
+        if parentId and parentLabel == GetString(parentId) then
+            for _, childName in ipairs(childNames) do
+                local childId = _G[childName]
+                if childId and entryLabel == GetString(childId) then return true end
+            end
+        end
+    end
+    return false
+end
+
+-- Other LCM evaluators require real mouse-menu rows, never bag rows.
+local function NormalizeSubmenuEntry(entry, parentLabel)
     if type(entry) ~= "table" then return nil end
     if entry.visible ~= nil and not EvaluateValue(entry.visible, ZO_Menu) then return nil end
     local kind = entry.itemType or MENU_ADD_OPTION_LABEL
     if kind == MENU_ADD_OPTION_HEADER then return nil end
     local labelValue = entry.label or entry.name or entry[1]
-    if type(labelValue) == "function" or type(entry.disabled) == "function"
+    if type(labelValue) == "function"
         or (kind == MENU_ADD_OPTION_CHECKBOX and type(entry.checked) == "function") then
         LogDebug("Unsupported submenu evaluator: requires a native mouse row")
         return nil
     end
-    if entry.disabled then return nil end
+    local disabled = entry.disabled
+    if type(disabled) == "function" then
+        if kind ~= MENU_ADD_OPTION_LABEL or not IsPersonalAssistantRuleEntry(parentLabel, labelValue) then
+            LogDebug("Unsupported submenu evaluator: requires a native mouse row")
+            return nil
+        end
+        local ok, value = pcall(disabled)
+        if not ok then
+            LogDebug("PersonalAssistant rule predicate failed; skipping item")
+            return nil
+        end
+        disabled = value
+    end
+    if disabled then return nil end
     local label = ResolveLabel(labelValue)
     local callback = entry.callback or entry.func or entry[2]
     if not label or IsDividerLabel(label) or type(callback) ~= "function" then return nil end
@@ -2024,7 +2060,7 @@ function bridge:_captureSubMenuEntries(capture, submenuLabelValue, entries, subm
     end
     local children = {}
     for i = 1, #entries do
-        local child = NormalizeSubmenuEntry(entries[i])
+        local child = NormalizeSubmenuEntry(entries[i], label)
         if child then children[#children + 1] = child end
     end
     if #children > 0 then
